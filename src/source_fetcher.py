@@ -5,10 +5,16 @@ import tempfile
 from pathlib import Path
 import time
 
+
+# File extensions to delete to remove figures and save space
+IMAGE_EXTENSIONS = {'.png', '.jpg', '.jpeg', '.pdf', '.eps', '.gif', '.bmp', '.ps'}
+
+
 def fetch_and_extract_source(arxiv_id: str, version: str, base_raw_dir: str = "data/raw", sleep_time: float = 3.0) -> str:
     """
-    Downloads and extracts the LaTeX source for a specific arXiv paper version.
-    Returns the path to the extracted directory (the latex_source_path).
+    Downloads, extracts, and cleans the LaTeX source for a specific arXiv paper version.
+    Removes all image files after extraction.
+    Returns the path to the extracted directory.
     """
     url = f"https://arxiv.org/e-print/{arxiv_id}{version}"
     headers = {"User-Agent": "HCMUS-IntroDS-Crawler/1.0 (academic project)"}
@@ -47,7 +53,14 @@ def fetch_and_extract_source(arxiv_id: str, version: str, base_raw_dir: str = "d
                     
             # Extract all files into the target directory
             tar.extractall(str(target_dir))
-            
+        
+        
+        # CLEANUP: Remove all figure/image files to save space
+        for root, dirs, files in os.walk(target_dir):
+            for file in files:
+                if Path(file).suffix.lower() in IMAGE_EXTENSIONS:
+                    os.remove(os.path.join(root, file))
+        
     except requests.exceptions.RequestException as e:
         raise Exception(f"Network error downloading source for {arxiv_id}{version}: {str(e)}")
     except tarfile.TarError as e:
