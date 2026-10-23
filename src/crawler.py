@@ -6,7 +6,7 @@ from version_probe import clean_arxiv_id, probe_versions
 from metadata import fetch_metadata
 from source_fetcher import fetch_and_extract_source
 from reference_extractor import extract_references
-from generate_arxiv_ids import generate_arxiv_ids
+from generate_ids import generate_arxiv_ids
 
 # Define paths based on our contract
 IDS_FILE = Path("data/inputs/arxiv_ids.txt")
