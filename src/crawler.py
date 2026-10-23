@@ -1,5 +1,7 @@
 import json
 from pathlib import Path
+from time import perf_counter
+from typing import Callable, TypeVar
 
 # Import the modules we built in the previous steps
 from version_probe import clean_arxiv_id, probe_versions
@@ -17,6 +19,18 @@ START_MONTH="2024-07"
 START_ID=2839
 END_MONTH="2024-07"
 END_ID=7838
+
+T = TypeVar("T")
+
+
+def run_timed_step(step: str, operation: Callable[..., T], *args, **kwargs) -> T:
+    started_at = perf_counter()
+    try:
+        return operation(*args, **kwargs)
+    finally:
+        elapsed = perf_counter() - started_at
+        print(f"   ⏱ {step}: {elapsed:.2f}s")
+
 
 def load_ids(file_path: Path) -> list[str]:
     """Reads the text file and returns a list of cleaned arXiv IDs."""
@@ -67,18 +81,23 @@ def log_failure(
 
 
 def main():
+    crawl_started_at = perf_counter()
     print("Starting arXiv Crawler...")
 
     # Generate ids
-    generate_arxiv_ids(
-        start_month=START_MONTH, start_id=START_ID, 
+    run_timed_step(
+        "Generating IDs",
+        generate_arxiv_ids,
+        start_month=START_MONTH, start_id=START_ID,
         end_month=END_MONTH, end_id=END_ID,
         output_path=IDS_FILE
     )
 
     # 1. Load inputs and handle resumability
-    all_ids = load_ids(IDS_FILE)
-    processed_ids = get_processed_ids(JSONL_FILE)
+    all_ids = run_timed_step("Loading IDs", load_ids, IDS_FILE)
+    processed_ids = run_timed_step(
+        "Loading processed IDs", get_processed_ids, JSONL_FILE
+    )
 
     print(
         f"Loaded {len(all_ids)} IDs. "
@@ -100,17 +119,23 @@ def main():
         print(
             f"[{i + 1}/{len(all_ids)}] Processing {arxiv_id}..."
         )
+        paper_started_at = perf_counter()
 
         current_step = "Starting crawl"
 
         try:
             # Step 1: Probe versions
             current_step = "Probing versions"
-            versions = probe_versions(arxiv_id)
+            versions = run_timed_step(
+                f"{current_step} for {arxiv_id}", probe_versions, arxiv_id
+            )
 
             # Step 2: Fetch metadata
             current_step = "Fetching metadata"
-            metadata_list = fetch_metadata(arxiv_id, versions)
+            metadata_list = run_timed_step(
+                f"{current_step} for {arxiv_id}",
+                fetch_metadata, arxiv_id, versions
+            )
 
             # Initialize the record for this paper
             paper_record = {
@@ -123,11 +148,18 @@ def main():
                 try:
                     # Download and extract source
                     current_step = f"Downloading/extracting source for {version}"
-                    latex_path = fetch_and_extract_source(arxiv_id, version, base_raw_dir=RAW_DIR)
+                    latex_path = run_timed_step(
+                        f"{current_step} ({arxiv_id})",
+                        fetch_and_extract_source,
+                        arxiv_id, version, base_raw_dir=RAW_DIR
+                    )
 
                     # Extract raw references
                     current_step = f"Extracting references for {version}"
-                    raw_refs = extract_references(latex_path)
+                    raw_refs = run_timed_step(
+                        f"{current_step} ({arxiv_id})",
+                        extract_references, latex_path
+                    )
                 
                 except Exception as e:
                     # ⚠️ Graceful handling: Source is missing or failed.
@@ -146,17 +178,27 @@ def main():
                 })
 
             # If everything succeeds, write to JSONL
-            write_jsonl(JSONL_FILE, paper_record)
+            run_timed_step(
+                f"Writing record for {arxiv_id}",
+                write_jsonl, JSONL_FILE, paper_record
+            )
 
-            print(f"Successfully processed {arxiv_id}")
+            print(
+                f"Successfully processed {arxiv_id} "
+                f"in {perf_counter() - paper_started_at:.2f}s"
+            )
 
         except Exception as e:
             # Log the failure with the exact step that caused it
             print(f"Total failure at step '{current_step}' for {arxiv_id}: {str(e)}")
             log_failure(FAILURES_FILE, arxiv_id, current_step, str(e))
+            print(
+                f"   Total time for {arxiv_id}: "
+                f"{perf_counter() - paper_started_at:.2f}s"
+            )
             continue
 
-    print("Crawler finished.")
+    print(f"Crawler finished in {perf_counter() - crawl_started_at:.2f}s.")
 
 if __name__ == "__main__":
     main()
