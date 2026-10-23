@@ -13,6 +13,10 @@ IDS_FILE = Path("data/inputs/arxiv_ids.txt")
 JSONL_FILE = Path("data/metadata/papers.jsonl")
 FAILURES_FILE = Path("data/metadata/failures.jsonl")
 RAW_DIR = "data/raw"
+START_MONTH="2024-07"
+START_ID=2839
+END_MONTH="2024-07"
+END_ID=7838
 
 def load_ids(file_path: Path) -> list[str]:
     """Reads the text file and returns a list of cleaned arXiv IDs."""
@@ -60,13 +64,15 @@ def log_failure(
     with open(failures_path, 'a', encoding='utf-8') as f:
         f.write(json.dumps(failure_record) + '\n')
 
+
+
 def main():
     print("Starting arXiv Crawler...")
 
     # Generate ids
     generate_arxiv_ids(
-        start_month="2024-07", start_id=2839, 
-        end_month="2024-07", end_id=7838,
+        start_month=START_MONTH, start_id=START_ID, 
+        end_month=END_MONTH, end_id=END_ID,
         output_path=IDS_FILE
     )
 
@@ -114,19 +120,22 @@ def main():
 
             # Step 3 & 4: Download sources and extract references
             for j, version in enumerate(versions):
-                # Download and extract source
-                current_step = (
-                    f"Downloading/extracting source for {version}"
-                )
-                
-                latex_path = fetch_and_extract_source(
-                    arxiv_id, version,
-                    base_raw_dir=RAW_DIR
-                )
+                try:
+                    # Download and extract source
+                    current_step = f"Downloading/extracting source for {version}"
+                    latex_path = fetch_and_extract_source(arxiv_id, version, base_raw_dir=RAW_DIR)
 
-                # Extract raw references
-                current_step = f"Extracting references for {version}"
-                raw_refs = extract_references(latex_path)
+                    # Extract raw references
+                    current_step = f"Extracting references for {version}"
+                    raw_refs = extract_references(latex_path)
+                
+                except Exception as e:
+                    # ⚠️ Graceful handling: Source is missing or failed.
+                    # We DO NOT crash the paper. We just set path to null.
+                    print(f"   ⚠️ Warning: Missing/failed source for {arxiv_id}{version}. Setting path to null.")
+                    latex_path = None
+                    raw_refs = []    
+
 
                 # Append to the paper record according to our contract
                 paper_record["versions"].append({
@@ -143,17 +152,8 @@ def main():
 
         except Exception as e:
             # Log the failure with the exact step that caused it
-            print(
-                f"Failed at step '{current_step}' "
-                f"for {arxiv_id}: {str(e)}"
-            )
-
-            log_failure(
-                FAILURES_FILE,
-                arxiv_id,
-                current_step,
-                str(e)
-            )
+            print(f"Total failure at step '{current_step}' for {arxiv_id}: {str(e)}")
+            log_failure(FAILURES_FILE, arxiv_id, current_step, str(e))
             continue
 
     print("Crawler finished.")
