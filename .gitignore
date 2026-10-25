@@ -1,4 +1,25 @@
+# Environment
+.venv
+venv
+.env
+
 src/data/raw
 
 
 __pycache__
+# MyST build outputs
+_build
+
+
+
+# Data
+data/
+
+
+# Others
+tmp/
+
+# Irrelevant markdown
+objects.md
+pipeline.md
+data.md

@@ -1,0 +1,15 @@
+version: 1
+project:
+  title: arXiv Corpus Engineering & Reference Matching
+  authors:
+    - name: ['Huỳnh Minh Thuận', 'Lê Thanh Phong']
+  toc:
+    - file: intro.md
+    - title: 'Milestone 1: Data Crawling'
+      children:
+        - file: milestone1/01_methodology.md
+        - file: milestone1/02_corpus_analysis.ipynb
+site:
+  options:
+    folders: true
+  template: book-theme

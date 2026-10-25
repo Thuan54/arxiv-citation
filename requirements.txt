@@ -1,0 +1,9 @@
+pydantic
+pandas
+numpy
+matplotlib
+pyarrow
+fastparquet
+jupyter
+notebook
+jupyter-book

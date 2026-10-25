@@ -1,0 +1,9 @@
+# MyST build outputs
+_build
+
+
+._config.yml.bak
+._toc.yml.bak
+
+# Data
+data/
