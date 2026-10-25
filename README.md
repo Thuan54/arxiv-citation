@@ -52,6 +52,8 @@ We have created 3 of this example in the branch `custom_crawler`, you can check 
 ## Jupyter Book
 For data visulization, we will run and render the result on **Jupyter Book** [This is goofy opening and need to fix]
 
+Make sure to **download and move** folder `data/metadata/papers.jsonl` into `arxiv-jupyter-book` and create a folder called `data/summary` inside directory `arxiv-jupyter-book`
+
 ```bash
 # From project root, move directory to jupyter book
 cd arxiv-jupyter-book
