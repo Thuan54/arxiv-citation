@@ -40,7 +40,7 @@ def fetch_metadata(arxiv_id: str, versions: list[str], sleep_time: float = 3.0) 
         summary = entry.find('atom:summary', ns).text.strip().replace('\n', ' ')
         authors = [author.find('atom:name', ns).text for author in entry.findall('atom:author', ns)]
         categories = [cat.get('term') for cat in entry.findall('atom:category', ns)]
-        published = entry.find('atom:published', ns).text
+        published = entry.find('atom:updated', ns).text
         
         fetched_data[entry_id] = {
             "title": title,
