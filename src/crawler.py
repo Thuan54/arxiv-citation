@@ -1,204 +1,130 @@
-import json
-from pathlib import Path
-from time import perf_counter
-from typing import Callable, TypeVar
 
-# Import the modules we built in the previous steps
-from version_probe import clean_arxiv_id, probe_versions
-from metadata import fetch_metadata
-from source_fetcher import fetch_and_extract_source
-from reference_extractor import extract_references
-from generate_ids import generate_arxiv_ids
+import logging
+import threading
+from queue import Queue
 
-# Define paths based on our contract
-IDS_FILE = Path("data/inputs/arxiv_ids.txt")
-JSONL_FILE = Path("data/metadata/papers.jsonl")
-FAILURES_FILE = Path("data/metadata/failures.jsonl")
-RAW_DIR = "data/raw"
-START_MONTH="2024-07"
-START_ID=2839
-END_MONTH="2024-07"
-END_ID=7838
-
-T = TypeVar("T")
+from config import (
+    NUM_DOWNLOADERS, NUM_EXTRACTORS, QUEUE_SIZE, DOWNLOAD_QUEUE_SIZE, EXTRACTION_QUEUE_SIZE
+)
+from discovery import iter_version_tasks
+from downloader import ( 
+    downloader_worker,
+    STOP,
+)
+from extractor import extraction_worker
+from metadata import metadata_worker
+from metric import metrics
+from logger import setup_logging
 
 
-def run_timed_step(step: str, operation: Callable[..., T], *args, **kwargs) -> T:
-    started_at = perf_counter()
-    try:
-        return operation(*args, **kwargs)
-    finally:
-        elapsed = perf_counter() - started_at
-        print(f"   ⏱ {step}: {elapsed:.2f}s")
-
-
-def load_ids(file_path: Path) -> list[str]:
-    """Reads the text file and returns a list of cleaned arXiv IDs."""
-    with open(file_path, 'r', encoding='utf-8') as f:
-        raw_ids = f.read().splitlines()
-
-    # Clean each ID and remove empty lines
-    return [clean_arxiv_id(rid) for rid in raw_ids if rid.strip()]
-
-def get_processed_ids(jsonl_path: Path) -> set:
-    """Reads the JSONL file and returns a set of already processed arXiv IDs for resumability."""
-    processed_ids = set()
-
-    if jsonl_path.exists():
-        with open(jsonl_path, 'r', encoding='utf-8') as f:
-            for line in f:
-                if line.strip():
-                    paper_data = json.loads(line)
-                    processed_ids.add(paper_data['arxiv_id'])
-
-    return processed_ids
-
-def write_jsonl(jsonl_path: Path, record: dict):
-    """Appends a single paper record as a JSON line to the output file."""
-    jsonl_path.parent.mkdir(parents=True, exist_ok=True)
-
-    with open(jsonl_path, 'a', encoding='utf-8') as f:
-        f.write(json.dumps(record) + '\n')
-
-def log_failure(
-    failures_path: Path,
-    arxiv_id: str,
-    step: str,
-    message: str
-):
-    """Appends a failure record to the failures JSONL file."""
-    failures_path.parent.mkdir(parents=True, exist_ok=True)
-
-    failure_record = {
-        "arxiv_id": arxiv_id,
-        "failed_step": step,
-        "error_message": message
-    }
-
-    with open(failures_path, 'a', encoding='utf-8') as f:
-        f.write(json.dumps(failure_record) + '\n')
-
+logger = logging.getLogger(__name__)
 
 
 def main():
-    crawl_started_at = perf_counter()
-    print("Starting arXiv Crawler...")
+    setup_logging(logging.INFO)
 
-    # Generate ids
-    run_timed_step(
-        "Generating IDs",
-        generate_arxiv_ids,
-        start_month=START_MONTH, start_id=START_ID,
-        end_month=END_MONTH, end_id=END_ID,
-        output_path=IDS_FILE
-    )
+    metadata_queue = Queue(maxsize=QUEUE_SIZE)
+    download_queue = Queue(maxsize=DOWNLOAD_QUEUE_SIZE)
+    extraction_queue = Queue(maxsize=EXTRACTION_QUEUE_SIZE)
 
-    # 1. Load inputs and handle resumability
-    all_ids = run_timed_step("Loading IDs", load_ids, IDS_FILE)
-    processed_ids = run_timed_step(
-        "Loading processed IDs", get_processed_ids, JSONL_FILE
-    )
+    errors = []
+    errors_lock = threading.Lock()
 
-    print(
-        f"Loaded {len(all_ids)} IDs. "
-        f"{len(processed_ids)} already processed."
-    )
+    def record_error(exc):
+        with errors_lock:
+            errors.append(exc)
 
-    # Ensure output directories exist
-    JSONL_FILE.parent.mkdir(parents=True, exist_ok=True)
-
-    # 2. Loop through IDs
-    for i, arxiv_id in enumerate(all_ids):
-        if arxiv_id in processed_ids:
-            print(
-                f"[{i + 1}/{len(all_ids)}] "
-                f"Skipping {arxiv_id}, already processed."
-            )
-            continue
-
-        print(
-            f"[{i + 1}/{len(all_ids)}] Processing {arxiv_id}..."
+        logger.error(
+            "Fatal pipeline error: %s: %s",
+            type(exc).__name__,
+            str(exc).splitlines()[0] or "No error details",
+            exc_info=(type(exc), exc, exc.__traceback__),
         )
-        paper_started_at = perf_counter()
 
-        current_step = "Starting crawl"
-
+    def produce():
         try:
-            # Step 1: Probe versions
-            current_step = "Probing versions"
-            versions = run_timed_step(
-                f"{current_step} for {arxiv_id}", probe_versions, arxiv_id
-            )
+            for task in iter_version_tasks():
+                metadata_queue.put(task)
+                download_queue.put(task)
 
-            # Step 2: Fetch metadata
-            current_step = "Fetching metadata"
-            metadata_list = run_timed_step(
-                f"{current_step} for {arxiv_id}",
-                fetch_metadata, arxiv_id, versions
-            )
+        except Exception as exc:
+            record_error(exc)
 
-            # Initialize the record for this paper
-            paper_record = {
-                "arxiv_id": arxiv_id,
-                "versions": []
-            }
+        finally:
+            # Metadata can finish independently of source extraction.
+            metadata_queue.put(STOP)
 
-            # Step 3 & 4: Download sources and extract references
-            for j, version in enumerate(versions):
-                try:
-                    # Download and extract source
-                    current_step = f"Downloading/extracting source for {version}"
-                    latex_path = run_timed_step(
-                        f"{current_step} ({arxiv_id})",
-                        fetch_and_extract_source,
-                        arxiv_id, version, base_raw_dir=RAW_DIR
-                    )
+            # Stop download producers. Extraction remains active
+            # until every downloader has finished.
+            for _ in range(NUM_DOWNLOADERS):
+                download_queue.put(STOP)
 
-                    # Extract raw references
-                    current_step = f"Extracting references for {version}"
-                    raw_refs = run_timed_step(
-                        f"{current_step} ({arxiv_id})",
-                        extract_references, latex_path
-                    )
-                
-                except Exception as e:
-                    # ⚠️ Graceful handling: Source is missing or failed.
-                    # We DO NOT crash the paper. We just set path to null.
-                    print(f"   ⚠️ Warning: Missing/failed source for {arxiv_id}{version}. Setting path to null.")
-                    latex_path = None
-                    raw_refs = []    
+    metadata_thread = threading.Thread(
+        target=metadata_worker,
+        args=(metadata_queue,),
+        name="metadata-worker",
+    )
 
+    downloader_threads = [
+        threading.Thread(
+            target=downloader_worker,
+            args=(worker_id, download_queue, extraction_queue),
+            name=f"downloader-{worker_id}",
+        )
+        for worker_id in range(NUM_DOWNLOADERS)
+    ]
 
-                # Append to the paper record according to our contract
-                paper_record["versions"].append({
-                    "version": version,
-                    "metadata": metadata_list[j],
-                    "latex_source_path": latex_path,
-                    "raw_references": raw_refs
-                })
+    extraction_threads = [
+        threading.Thread(
+            target=extraction_worker,
+            args=(worker_id, extraction_queue),
+            name=f"extractor-{worker_id}",
+        )
+        for worker_id in range(NUM_EXTRACTORS)
+    ]
 
-            # If everything succeeds, write to JSONL
-            run_timed_step(
-                f"Writing record for {arxiv_id}",
-                write_jsonl, JSONL_FILE, paper_record
-            )
+    # Start consumers before the producer to avoid queue deadlocks.
+    metadata_thread.start()
 
-            print(
-                f"Successfully processed {arxiv_id} "
-                f"in {perf_counter() - paper_started_at:.2f}s"
-            )
+    for worker in extraction_threads:
+        worker.start()
 
-        except Exception as e:
-            # Log the failure with the exact step that caused it
-            print(f"Total failure at step '{current_step}' for {arxiv_id}: {str(e)}")
-            log_failure(FAILURES_FILE, arxiv_id, current_step, str(e))
-            print(
-                f"   Total time for {arxiv_id}: "
-                f"{perf_counter() - paper_started_at:.2f}s"
-            )
-            continue
+    for worker in downloader_threads:
+        worker.start()
 
-    print(f"Crawler finished in {perf_counter() - crawl_started_at:.2f}s.")
+    producer = threading.Thread(
+        target=produce,
+        name="discovery",
+    )
+    producer.start()
+
+    producer.join()
+
+    # All discovered download tasks and stop signals are queued.
+    download_queue.join()
+
+    for worker in downloader_threads:
+        worker.join()
+
+    # No downloader can enqueue more extraction work now.
+    for _ in range(NUM_EXTRACTORS):
+        extraction_queue.put(STOP)
+
+    extraction_queue.join()
+
+    for worker in extraction_threads:
+        worker.join()
+
+    metadata_queue.join()
+    metadata_thread.join()
+
+    metrics.report()
+
+    if errors:
+        raise RuntimeError(
+            f"Pipeline encountered {len(errors)} fatal error(s)"
+        ) from errors[0]
+
 
 if __name__ == "__main__":
     main()
