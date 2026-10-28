@@ -4,6 +4,7 @@ import requests
 from config import API_INTERVAL, API_TIMEOUT, BATCH_SIZE, USER_AGENT
 from helper import log_failure, parse_versioned_id
 from metric import metrics
+from monitor import monitor
 from rate_limiter import arxiv_limiter
 from state import set_metadata
 
@@ -13,9 +14,25 @@ ATOM_NS = {"atom": "http://www.w3.org/2005/Atom"}
 def fetch_metadata_batch(tasks):
   """Fetch metadata for a bounded batch of version tasks."""
   expected = {task["version_id"]: task for task in tasks}
+  batch_label = (
+      f"{tasks[0]['version_id']} (+{len(tasks) - 1})"
+      if tasks else None
+  )
 
   try:
+      monitor.state(
+          "metadata-worker",
+          "waiting_for_rate_limiter",
+          task=batch_label,
+          batch_size=len(tasks),
+      )
       with arxiv_limiter.request("api"):
+        monitor.state(
+            "metadata-worker",
+            "api_request",
+            task=batch_label,
+            batch_size=len(tasks),
+        )
         with metrics.measure("metadata_batch"):
             response = requests.get(
                 API_URL,
@@ -27,6 +44,12 @@ def fetch_metadata_batch(tasks):
                 timeout=API_TIMEOUT,
             )
             response.raise_for_status()
+            monitor.state(
+                "metadata-worker",
+                "parsing_response",
+                task=batch_label,
+                batch_size=len(tasks),
+            )
             root = ET.fromstring(response.text)
       returned = set()
 
@@ -106,6 +129,8 @@ def fetch_metadata_batch(tasks):
           )
           metrics.inc("metadata_versions_failed")
 
+  monitor.completed("metadata_batches")
+
 
 def metadata_worker(task_queue):
   """Consume individual tasks and fetch them in API-sized batches."""
@@ -113,6 +138,11 @@ def metadata_worker(task_queue):
   batch = []
 
   while True:
+      monitor.state(
+          "metadata-worker",
+          "waiting_for_metadata_task",
+          pending_batch_size=len(batch),
+      )
       task = task_queue.get()
 
       try:
@@ -120,6 +150,7 @@ def metadata_worker(task_queue):
               if batch:
                   fetch_metadata_batch(batch)
                   batch.clear()
+              monitor.state("metadata-worker", "stopped")
               return
 
           batch.append(task)

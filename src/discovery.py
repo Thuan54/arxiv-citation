@@ -9,6 +9,7 @@ from config import (
 )
 from helper import clean_arxiv_id, get_processed_ids, log_failure
 from metric import metrics
+from monitor import monitor
 from rate_limiter import arxiv_limiter
 from state import initialize_paper
 
@@ -19,6 +20,7 @@ ATOM_NS = {"atom": "http://www.w3.org/2005/Atom"}
 
 def iter_id_batches():
     """Read IDs incrementally, keeping only one input batch in memory."""
+    monitor.state("discovery", "reading_ids")
     if not IDS_FILE.exists():
         raise FileNotFoundError(IDS_FILE)
 
@@ -28,6 +30,7 @@ def iter_id_batches():
 
     with IDS_FILE.open("r", encoding="utf-8") as file:
         for line in file:
+            monitor.state("discovery", "reading_ids")
             arxiv_id = clean_arxiv_id(line)
 
             if not arxiv_id:
@@ -51,7 +54,20 @@ def iter_id_batches():
 
 def discover_batch(batch):
     """Discover versions for one bounded batch of paper IDs."""
+    batch_label = f"{batch[0]} (+{len(batch) - 1})" if batch else None
+    monitor.state(
+        "discovery",
+        "waiting_for_rate_limiter",
+        task=batch_label,
+        batch_size=len(batch),
+    )
     with arxiv_limiter.request("api"):
+      monitor.state(
+          "discovery",
+          "api_request",
+          task=batch_label,
+          batch_size=len(batch),
+      )
       with metrics.measure("discovery_api"):
           response = requests.get(
               API_URL,
@@ -64,6 +80,12 @@ def discover_batch(batch):
           )
           response.raise_for_status()
 
+    monitor.state(
+        "discovery",
+        "parsing_response",
+        task=batch_label,
+        batch_size=len(batch),
+    )
     root = ET.fromstring(response.text)
     latest_versions = {}
 
@@ -126,6 +148,7 @@ def iter_version_tasks():
     for batch in iter_id_batches():
         try:
             yield from discover_batch(batch)
+            monitor.completed("discovery_batches")
 
         except Exception as exc:
             metrics.inc("discovery_batches_failed")

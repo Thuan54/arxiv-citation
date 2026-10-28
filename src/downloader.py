@@ -9,6 +9,7 @@ import requests
 
 from config import DOWNLOAD_TIMEOUT, RAW_DIR, USER_AGENT
 from helper import log_failure, format_error
+from monitor import monitor
 from rate_limiter import arxiv_limiter
 from metric import metrics
 from state import set_source
@@ -20,7 +21,16 @@ MAX_DOWNLOAD_ATTEMPTS = 3
 CHUNK_SIZE = 64 * 1024
 
 
-def download_source(session, url, headers, timeout, directory, arxiv_id=None):
+def download_source(
+    session,
+    url,
+    headers,
+    timeout,
+    directory,
+    arxiv_id=None,
+    worker_name=None,
+    monitor_task=None,
+):
     """Download and validate a gzip source archive with retries."""
     directory = Path(directory)
     directory.mkdir(parents=True, exist_ok=True)
@@ -31,7 +41,21 @@ def download_source(session, url, headers, timeout, directory, arxiv_id=None):
         tmp_path = None
 
         try:
+            if worker_name:
+                monitor.state(
+                    worker_name,
+                    "waiting_for_rate_limiter",
+                    task=monitor_task or arxiv_id,
+                    attempt=attempt,
+                )
             with arxiv_limiter.request("source"):
+                if worker_name:
+                    monitor.state(
+                        worker_name,
+                        "http_download",
+                        task=monitor_task or arxiv_id,
+                        attempt=attempt,
+                    )
                 with metrics.measure("source_download"):
                     with session.get(
                         url,
@@ -128,6 +152,14 @@ def download_source(session, url, headers, timeout, directory, arxiv_id=None):
                     url,
                     format_error(exc),
                 )
+                if worker_name:
+                    monitor.state(
+                        worker_name,
+                        "retry_backoff",
+                        task=monitor_task or arxiv_id,
+                        attempt=attempt,
+                        delay_seconds=attempt * 2,
+                    )
                 time.sleep(attempt * 2)
               
 
@@ -153,6 +185,12 @@ def download_task(worker_id, task, extraction_queue, session):
         destination.is_dir()
         and (destination / ".complete").is_file()
     ):
+        monitor.state(
+            f"downloader-{worker_id}",
+            "waiting_to_enqueue_extraction",
+            task=version_id,
+            reused=True,
+        )
         extraction_queue.put({
             "task": task,
             "tmp_path": None,
@@ -174,10 +212,18 @@ def download_task(worker_id, task, extraction_queue, session):
             timeout=DOWNLOAD_TIMEOUT,
             directory=destination.parent,
             arxiv_id=arxiv_id,
+            worker_name=f"downloader-{worker_id}",
+            monitor_task=version_id,
         )
 
         # Transfer ownership of the temporary file to the
         # extraction worker.
+        monitor.state(
+            f"downloader-{worker_id}",
+            "waiting_to_enqueue_extraction",
+            task=version_id,
+            reused=False,
+        )
         extraction_queue.put({
             "task": task,
             "tmp_path": tmp_path,
@@ -229,18 +275,32 @@ def downloader_worker(worker_id, download_queue, extraction_queue):
 
     try:
         while True:
+            monitor.state(
+                f"downloader-{worker_id}",
+                "waiting_for_download_task",
+            )
             task = download_queue.get()
 
             try:
                 if task is STOP:
+                    monitor.state(
+                        f"downloader-{worker_id}",
+                        "stopped",
+                    )
                     return
 
+                monitor.state(
+                    f"downloader-{worker_id}",
+                    "processing_download",
+                    task=task["version_id"],
+                )
                 download_task(
                     worker_id,
                     task,
                     extraction_queue,
                     session,
                 )
+                monitor.completed("download_tasks")
 
             finally:
                 download_queue.task_done()
