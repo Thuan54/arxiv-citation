@@ -3,10 +3,11 @@ import re
 import threading
 import traceback
 from datetime import datetime, timezone
+from pathlib import Path
 
 import requests
 
-from config import FAILURES_FILE
+from config import FAILURES_FILE, ROOT
 
 _failure_lock = threading.Lock()
 
