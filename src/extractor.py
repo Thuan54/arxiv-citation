@@ -12,6 +12,7 @@ from downloader import STOP
 from config import RAW_DIR, IMAGE_EXTENSIONS
 from helper import log_failure, format_error, relative_source_path
 from metric import metrics
+from monitor import monitor
 from state import set_source
 
 
@@ -143,8 +144,9 @@ def remove_images(directory):
   metrics.inc("files_removed", removed)
 
 
-def extraction_task(item):
+def extraction_task(item, worker_id):
     """Extract, validate, and publish one downloaded source."""
+    worker_name = f"extractor-{worker_id}"
     task = item["task"]
     tmp_path = item["tmp_path"]
 
@@ -165,6 +167,11 @@ def extraction_task(item):
         # A previously completed extraction can be reused.
         if item["reused"]:
             stage = "reference_extraction"
+            monitor.state(
+                worker_name,
+                "extracting_references",
+                task=task["version_id"],
+            )
 
             with metrics.measure("reference_extraction"):
                 raw_references = extract_raw_references(
@@ -176,6 +183,11 @@ def extraction_task(item):
             return
 
         stage = "extract_archive"
+        monitor.state(
+            worker_name,
+            "extracting_archive",
+            task=task["version_id"],
+        )
 
         staging_dir = tempfile.mkdtemp(
             prefix=f".{version}-staging-",
@@ -186,6 +198,11 @@ def extraction_task(item):
             extract_source(tmp_path, staging_dir)
 
         stage = "reference_extraction"
+        monitor.state(
+            worker_name,
+            "extracting_references",
+            task=task["version_id"],
+        )
 
         with metrics.measure("reference_extraction"):
             raw_references = extract_raw_references(
@@ -197,6 +214,11 @@ def extraction_task(item):
         (Path(staging_dir) / ".complete").touch()
 
         stage = "publish"
+        monitor.state(
+            worker_name,
+            "publishing_directory",
+            task=task["version_id"],
+        )
 
         if destination.exists():
             backup_dir = tempfile.mkdtemp(
@@ -290,13 +312,27 @@ def extraction_worker(worker_id, extraction_queue):
 
     try:
         while True:
+            monitor.state(
+                f"extractor-{worker_id}",
+                "waiting_for_extraction_task",
+            )
             item = extraction_queue.get()
 
             try:
                 if item is STOP:
+                    monitor.state(
+                        f"extractor-{worker_id}",
+                        "stopped",
+                    )
                     return
 
-                extraction_task(item)
+                monitor.state(
+                    f"extractor-{worker_id}",
+                    "processing_extraction",
+                    task=item["task"]["version_id"],
+                )
+                extraction_task(item, worker_id)
+                monitor.completed("extraction_tasks")
 
             finally:
                 extraction_queue.task_done()

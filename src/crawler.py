@@ -1,4 +1,5 @@
 
+import json
 import logging
 import threading
 from queue import Queue
@@ -15,9 +16,22 @@ from extractor import extraction_worker
 from metadata import metadata_worker
 from metric import metrics
 from logger import setup_logging
+from monitor import monitor
 
 
 logger = logging.getLogger(__name__)
+HEALTH_REPORT_INTERVAL = 5
+
+
+def health_report(stop_event, queues):
+    while True:
+        logger.info(
+            "PIPELINE_HEALTH %s",
+            json.dumps(monitor.snapshot(queues), ensure_ascii=False),
+        )
+
+        if stop_event.wait(HEALTH_REPORT_INTERVAL):
+            return
 
 
 def main():
@@ -42,9 +56,21 @@ def main():
         )
 
     def produce():
+        monitor.state("discovery", "starting")
         try:
             for task in iter_version_tasks():
+                monitor.state(
+                    "discovery",
+                    "waiting_to_enqueue_metadata",
+                    task=task["version_id"],
+                )
                 metadata_queue.put(task)
+
+                monitor.state(
+                    "discovery",
+                    "waiting_to_enqueue_download",
+                    task=task["version_id"],
+                )
                 download_queue.put(task)
 
         except Exception as exc:
@@ -52,10 +78,12 @@ def main():
 
         finally:
             # Metadata can finish independently of source extraction.
+            monitor.state("discovery", "waiting_to_enqueue_metadata_stop")
             metadata_queue.put(STOP)
 
             # Stop download producers. Extraction remains active
             # until every downloader has finished.
+            monitor.state("discovery", "waiting_to_enqueue_download_stops")
             for _ in range(NUM_DOWNLOADERS):
                 download_queue.put(STOP)
 
@@ -96,27 +124,49 @@ def main():
         target=produce,
         name="discovery",
     )
+    monitor_stop = threading.Event()
+    health_thread = threading.Thread(
+        target=health_report,
+        args=(
+            monitor_stop,
+            {
+                "metadata": metadata_queue,
+                "download": download_queue,
+                "extraction": extraction_queue,
+            },
+        ),
+        name="health-monitor",
+        daemon=True,
+    )
+    health_thread.start()
     producer.start()
 
     producer.join()
 
     # All discovered download tasks and stop signals are queued.
+    monitor.state("crawler", "waiting_for_downloads")
     download_queue.join()
 
     for worker in downloader_threads:
         worker.join()
 
     # No downloader can enqueue more extraction work now.
+    monitor.state("crawler", "waiting_to_enqueue_extraction_stops")
     for _ in range(NUM_EXTRACTORS):
         extraction_queue.put(STOP)
 
+    monitor.state("crawler", "waiting_for_extractions")
     extraction_queue.join()
 
     for worker in extraction_threads:
         worker.join()
 
+    monitor.state("crawler", "waiting_for_metadata")
     metadata_queue.join()
     metadata_thread.join()
+
+    monitor_stop.set()
+    health_thread.join()
 
     metrics.report()
 
