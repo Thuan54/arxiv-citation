@@ -1,6 +1,19 @@
 import gzip
 import tarfile
 from pathlib import Path
+import re
+import logging
+import tempfile
+import os
+import shutil
+
+
+from downloader import STOP
+from config import RAW_DIR, IMAGE_EXTENSIONS
+from helper import log_failure, format_error, relative_source_path
+from metric import metrics
+from state import set_source
+
 
 BIBITEM_PATTERN = re.compile(
     r"\\bibitem(?:\s*\[[^\]]*\])?\s*\{[^}]*\}"
@@ -10,6 +23,7 @@ BIBITEM_PATTERN = re.compile(
     re.DOTALL,
 )
 
+logger = logging.getLogger(__name__)
 
 def extract_raw_references(directory):
     """Extract complete raw bibitem entries from TeX files."""

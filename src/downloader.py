@@ -8,7 +8,6 @@ from pathlib import Path
 import requests
 
 from config import DOWNLOAD_TIMEOUT, RAW_DIR, USER_AGENT
-from extracter import extract_source, extract_raw_references
 from helper import log_failure, format_error
 from rate_limiter import arxiv_limiter
 from metric import metrics

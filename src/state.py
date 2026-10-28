@@ -1,6 +1,8 @@
 import json
 import threading
 
+from config import JSONL_FILE
+
 _lock = threading.Lock()
 _write_lock = threading.Lock()
 _papers = {}
