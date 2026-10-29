@@ -1,4 +1,3 @@
-import logging
 import os
 import shutil
 import tempfile
@@ -13,8 +12,9 @@ from monitor import monitor
 from rate_limiter import arxiv_limiter
 from metric import metrics
 from state import set_source
+from logger import get_logger
 
-logger = logging.getLogger(__name__)
+logger = get_logger(__name__)
 STOP = None
 
 MAX_DOWNLOAD_ATTEMPTS = 3
@@ -257,10 +257,12 @@ def download_task(worker_id, task, extraction_queue, session):
         )
 
         logger.error(
-            "Download failed | paper=%s | version=%s | %s",
+            "Download failed | worker=%s | paper=%s | version=%s | %s",
+            worker_id,
             arxiv_id,
             version,
             format_error(exc),
+            exc_info=(type(exc), exc, exc.__traceback__),
         )
 
     finally:

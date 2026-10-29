@@ -1,6 +1,5 @@
 
 import json
-import logging
 import threading
 from queue import Queue
 
@@ -15,17 +14,18 @@ from downloader import (
 from extractor import extraction_worker
 from metadata import metadata_worker
 from metric import metrics
-from logger import setup_logging
+from logger import get_logger, setup_logging
 from monitor import monitor
 
 
-logger = logging.getLogger(__name__)
+logger = get_logger(__name__)
+health_logger = get_logger("pipeline.health")
 HEALTH_REPORT_INTERVAL = 5
 
 
 def health_report(stop_event, queues):
     while True:
-        logger.info(
+        health_logger.info(
             "PIPELINE_HEALTH %s",
             json.dumps(monitor.snapshot(queues), ensure_ascii=False),
         )
@@ -35,7 +35,7 @@ def health_report(stop_event, queues):
 
 
 def main():
-    setup_logging(logging.INFO)
+    setup_logging(only_logger="pipeline.health")
 
     metadata_queue = Queue(maxsize=QUEUE_SIZE)
     download_queue = Queue(maxsize=DOWNLOAD_QUEUE_SIZE)

@@ -2,10 +2,12 @@ import json
 import threading
 
 from config import JSONL_FILE
+from logger import get_logger
 
 _lock = threading.Lock()
 _write_lock = threading.Lock()
 _papers = {}
+logger = get_logger(__name__)
 
 
 def initialize_paper(arxiv_id, versions):
@@ -64,10 +66,11 @@ def _write_record(record):
                 json.dumps(record, ensure_ascii=False) + "\n"
             )
 
-    print(
-        f"[Success] Paper {record['arxiv_id']} "
-        f"({len(record['versions'])} versions) "
-        f"written to {JSONL_FILE}"
+    logger.info(
+        "Paper %s (%s versions) written to %s",
+        record["arxiv_id"],
+        len(record["versions"]),
+        JSONL_FILE,
     )
 
 
