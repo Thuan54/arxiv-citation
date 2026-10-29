@@ -7,6 +7,9 @@ from contextlib import contextmanager
 from pathlib import Path
 
 from config import METRICS_FILE
+from logger import get_logger
+
+logger = get_logger(__name__)
 
 class Metrics:
     def __init__(self, output_path: Path):
@@ -74,7 +77,7 @@ class Metrics:
         )
         temporary.replace(self.output_path)
 
-        print(json.dumps(result, indent=2))
+        logger.info("Metrics report:\n%s", json.dumps(result, indent=2))
         return result
 
 

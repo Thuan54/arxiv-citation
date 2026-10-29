@@ -8,6 +8,7 @@ from config import (
     API_INTERVAL, API_TIMEOUT, BATCH_SIZE, IDS_FILE, JSONL_FILE, USER_AGENT,
 )
 from helper import clean_arxiv_id, get_processed_ids, log_failure
+from logger import get_logger
 from metric import metrics
 from monitor import monitor
 from rate_limiter import arxiv_limiter
@@ -16,6 +17,7 @@ from state import initialize_paper
 
 API_URL = "https://export.arxiv.org/api/query"
 ATOM_NS = {"atom": "http://www.w3.org/2005/Atom"}
+logger = get_logger(__name__)
 
 
 def iter_id_batches():
@@ -156,5 +158,4 @@ def iter_version_tasks():
             for arxiv_id in batch:
                 log_failure(arxiv_id, "Discovery", exc)
 
-
-print("[Discovery] Finished")
+    logger.info("Discovery finished")

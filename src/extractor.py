@@ -2,7 +2,6 @@ import gzip
 import tarfile
 from pathlib import Path
 import re
-import logging
 import tempfile
 import os
 import shutil
@@ -14,6 +13,7 @@ from helper import log_failure, format_error, relative_source_path
 from metric import metrics
 from monitor import monitor
 from state import set_source
+from logger import get_logger
 
 
 BIBITEM_PATTERN = re.compile(
@@ -24,7 +24,7 @@ BIBITEM_PATTERN = re.compile(
     re.DOTALL,
 )
 
-logger = logging.getLogger(__name__)
+logger = get_logger(__name__)
 
 def extract_raw_references(directory):
     """Extract complete raw bibitem entries from TeX files."""

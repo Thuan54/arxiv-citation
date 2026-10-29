@@ -3,6 +3,7 @@ import requests
 
 from config import API_INTERVAL, API_TIMEOUT, BATCH_SIZE, USER_AGENT
 from helper import log_failure, parse_versioned_id
+from logger import get_logger
 from metric import metrics
 from monitor import monitor
 from rate_limiter import arxiv_limiter
@@ -10,6 +11,7 @@ from state import set_metadata
 
 API_URL = "https://export.arxiv.org/api/query"
 ATOM_NS = {"atom": "http://www.w3.org/2005/Atom"}
+logger = get_logger(__name__)
 
 def fetch_metadata_batch(tasks):
   """Fetch metadata for a bounded batch of version tasks."""
@@ -134,7 +136,7 @@ def fetch_metadata_batch(tasks):
 
 def metadata_worker(task_queue):
   """Consume individual tasks and fetch them in API-sized batches."""
-  print("[Metadata Worker] Starting")
+  logger.info("Metadata worker started")
   batch = []
 
   while True:
@@ -150,6 +152,8 @@ def metadata_worker(task_queue):
               if batch:
                   fetch_metadata_batch(batch)
                   batch.clear()
+
+              logger.info("Metadata worker stopped")
               monitor.state("metadata-worker", "stopped")
               return
 
@@ -161,5 +165,3 @@ def metadata_worker(task_queue):
 
       finally:
           task_queue.task_done()
-
-  print("[Metadata Worker] Finished")
