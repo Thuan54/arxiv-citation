@@ -1,3 +1,4 @@
+from datetime import datetime, timezone
 import threading
 import time
 
@@ -10,8 +11,13 @@ class PipelineMonitor:
         self._completed = {}
         self._last_completion = self._started
 
+    @staticmethod
+    def _timestamp():
+        return datetime.now(timezone.utc).isoformat(timespec="milliseconds")
+
     def state(self, worker, state, task=None, **details):
         now = time.monotonic()
+        timestamp = self._timestamp()
 
         with self._lock:
             previous = self._workers.get(worker, {})
@@ -19,11 +25,32 @@ class PipelineMonitor:
                 previous.get("state") == state
                 and previous.get("task") == task
             )
+            previous_task = previous.get("task")
+
+            if task is not None and task != previous_task:
+                task_started_at = timestamp
+                last_progress_at = timestamp
+                task_finished_at = None
+            elif task is not None:
+                task_started_at = previous.get("task_started_at")
+                last_progress_at = timestamp
+                task_finished_at = previous.get("task_finished_at")
+            elif previous_task is not None:
+                task_started_at = previous.get("task_started_at")
+                last_progress_at = timestamp
+                task_finished_at = timestamp
+            else:
+                task_started_at = previous.get("task_started_at")
+                last_progress_at = previous.get("last_progress_at")
+                task_finished_at = previous.get("task_finished_at")
 
             self._workers[worker] = {
                 "state": state,
                 "task": task,
                 "since": previous["since"] if same_operation else now,
+                "task_started_at": task_started_at,
+                "last_progress_at": last_progress_at,
+                "task_finished_at": task_finished_at,
                 "details": details,
             }
 
@@ -41,6 +68,9 @@ class PipelineMonitor:
                     "state": info["state"],
                     "task": info["task"],
                     "duration_seconds": round(now - info["since"], 1),
+                    "task_started_at": info["task_started_at"],
+                    "last_progress_at": info["last_progress_at"],
+                    "task_finished_at": info["task_finished_at"],
                     "details": dict(info["details"]),
                 }
                 for name, info in self._workers.items()
