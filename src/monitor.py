@@ -1,6 +1,12 @@
 from datetime import datetime, timezone
+import json
 import threading
 import time
+
+from logger import get_logger
+
+
+logger = get_logger("pipeline.worker")
 
 
 class PipelineMonitor:
@@ -25,7 +31,13 @@ class PipelineMonitor:
                 previous.get("state") == state
                 and previous.get("task") == task
             )
+            previous_state = previous.get("state")
             previous_task = previous.get("task")
+            previous_state_duration = (
+                round(now - previous["since"], 1)
+                if previous
+                else None
+            )
 
             if task is not None and task != previous_task:
                 task_started_at = timestamp
@@ -53,6 +65,19 @@ class PipelineMonitor:
                 "task_finished_at": task_finished_at,
                 "details": details,
             }
+
+        if not same_operation:
+            logger.info(
+                "WORKER_STATE worker=%s state=%s task=%s "
+                "previous_state=%s previous_state_duration_seconds=%s "
+                "details=%s",
+                worker,
+                state,
+                task if task is not None else previous_task,
+                previous_state,
+                previous_state_duration,
+                json.dumps(details, ensure_ascii=False, sort_keys=True),
+            )
 
     def completed(self, stage):
         with self._lock:

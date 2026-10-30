@@ -35,7 +35,7 @@ def health_report(stop_event, queues):
 
 
 def main():
-    setup_logging(only_logger="pipeline.health")
+    setup_logging(only_logger="pipeline")
 
     metadata_queue = Queue(maxsize=QUEUE_SIZE)
     download_queue = Queue(maxsize=DOWNLOAD_QUEUE_SIZE)
