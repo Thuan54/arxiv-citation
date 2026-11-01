@@ -1,0 +1,15 @@
+# See docs at: https://mystmd.org/guide/frontmatter
+version: 1
+project:
+  id: b75c910d-fc1f-466e-92e7-a91b51b48883
+  title: a cool data science project
+  # description:
+  # keywords: []
+  authors: ['Huỳnh Minh Thuận', 'Lê Thanh Phong', 'Đào Anh Hào']
+  # github:
+  # To autogenerate a Table of Contents, run "jupyter book init --write-toc"
+site:
+  template: book-theme
+  # options:
+  #   favicon: favicon.ico
+  #   logo: site_logo.png
