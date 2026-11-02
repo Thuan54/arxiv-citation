@@ -138,7 +138,8 @@ def main():
         name="health-monitor",
         daemon=True,
     )
-    health_thread.start()
+    if monitor.enabled:
+        health_thread.start()
     producer.start()
 
     producer.join()
@@ -165,8 +166,9 @@ def main():
     metadata_queue.join()
     metadata_thread.join()
 
-    monitor_stop.set()
-    health_thread.join()
+    if monitor.enabled:
+        monitor_stop.set()
+        health_thread.join()
 
     metrics.report()
 

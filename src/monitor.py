@@ -4,13 +4,15 @@ import threading
 import time
 
 from logger import get_logger
+from config import MONITOR_ENABLED
 
 
 logger = get_logger("pipeline.worker")
 
 
 class PipelineMonitor:
-    def __init__(self):
+    def __init__(self, enabled=MONITOR_ENABLED):
+        self.enabled = enabled
         self._lock = threading.Lock()
         self._started = time.monotonic()
         self._workers = {}
@@ -22,6 +24,9 @@ class PipelineMonitor:
         return datetime.now(timezone.utc).isoformat(timespec="milliseconds")
 
     def state(self, worker, state, task=None, **details):
+        if not self.enabled:
+            return
+
         now = time.monotonic()
         timestamp = self._timestamp()
 
@@ -80,11 +85,17 @@ class PipelineMonitor:
             )
 
     def completed(self, stage):
+        if not self.enabled:
+            return
+
         with self._lock:
             self._completed[stage] = self._completed.get(stage, 0) + 1
             self._last_completion = time.monotonic()
 
     def snapshot(self, queues=None):
+        if not self.enabled:
+            return {}
+
         now = time.monotonic()
 
         with self._lock:
