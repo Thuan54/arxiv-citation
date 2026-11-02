@@ -64,7 +64,7 @@ def extract_raw_references(directory):
     """Extract unique raw bibitem entries from TeX and BBL files."""
     directory = Path(directory)
     references = []
-    seen = set()
+    files_read_failed = 0
 
     source_files = sorted(
         path
@@ -78,8 +78,8 @@ def extract_raw_references(directory):
                 errors="replace",
             )
         except OSError:
-            # Continue scanning the remaining source files.
-            metrics.inc("reference_files_read_failed")
+            # Continue scanning other TeX files.
+            files_read_failed += 1
             continue
 
         content = _strip_tex_comments(content)
@@ -91,10 +91,7 @@ def extract_raw_references(directory):
                 seen.add(normalized_reference)
                 references.append(reference)
 
-    metrics.inc("raw_references_extracted", len(references))
-    if not references:
-        metrics.inc("versions_without_references")
-    return references
+    return references, files_read_failed
 
 def safe_extract(archive, destination):
   root = destination.resolve()
