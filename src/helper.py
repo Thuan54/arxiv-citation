@@ -71,6 +71,8 @@ def log_failure(
     message,
     *,
     exception=None,
+    exception_type=None,
+    traceback_text=None,
     attempt=None,
     url=None,
     details=None,
@@ -101,6 +103,11 @@ def log_failure(
                     exception.__traceback__,
                 )
             )
+    elif exception_type is not None:
+        record["exception_type"] = exception_type
+
+    if traceback_text is not None:
+        record["traceback"] = traceback_text
 
     if attempt is not None:
         record["attempt"] = attempt

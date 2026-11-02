@@ -4,14 +4,15 @@ import threading
 from queue import Queue
 
 from config import (
-    NUM_DOWNLOADERS, NUM_EXTRACTORS, QUEUE_SIZE, DOWNLOAD_QUEUE_SIZE, EXTRACTION_QUEUE_SIZE
+    EXTRACTOR_BACKEND, NUM_DOWNLOADERS, NUM_EXTRACTORS, QUEUE_SIZE,
+    DOWNLOAD_QUEUE_SIZE, EXTRACTION_QUEUE_SIZE,
 )
 from discovery import iter_version_tasks
 from downloader import ( 
     downloader_worker,
     STOP,
 )
-from extractor import extraction_worker
+from extractor import extraction_worker, process_extraction_worker
 from metadata import metadata_worker
 from metric import metrics
 from logger import get_logger, setup_logging
@@ -101,14 +102,23 @@ def main():
         for worker_id in range(NUM_DOWNLOADERS)
     ]
 
-    extraction_threads = [
-        threading.Thread(
-            target=extraction_worker,
-            args=(worker_id, extraction_queue),
-            name=f"extractor-{worker_id}",
-        )
-        for worker_id in range(NUM_EXTRACTORS)
-    ]
+    if EXTRACTOR_BACKEND == "process":
+        extraction_threads = [
+            threading.Thread(
+                target=process_extraction_worker,
+                args=(extraction_queue, NUM_EXTRACTORS),
+                name="extraction-process-dispatcher",
+            )
+        ]
+    else:
+        extraction_threads = [
+            threading.Thread(
+                target=extraction_worker,
+                args=(worker_id, extraction_queue),
+                name=f"extractor-{worker_id}",
+            )
+            for worker_id in range(NUM_EXTRACTORS)
+        ]
 
     # Start consumers before the producer to avoid queue deadlocks.
     metadata_thread.start()

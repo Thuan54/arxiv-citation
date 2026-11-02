@@ -1,10 +1,14 @@
+from concurrent.futures import FIRST_COMPLETED, ProcessPoolExecutor, wait
 import gzip
+import multiprocessing
 import tarfile
 from pathlib import Path
 import re
 import tempfile
 import os
 import shutil
+import time
+import traceback
 
 
 from downloader import STOP
@@ -30,6 +34,7 @@ def extract_raw_references(directory):
     """Extract complete raw bibitem entries from TeX files."""
     directory = Path(directory)
     references = []
+    files_read_failed = 0
 
     for tex_file in sorted(directory.rglob("*.tex")):
         try:
@@ -37,9 +42,9 @@ def extract_raw_references(directory):
                 encoding="utf-8",
                 errors="replace",
             )
-        except OSError as exc:
+        except OSError:
             # Continue scanning other TeX files.
-            metrics.inc("reference_files_read_failed")
+            files_read_failed += 1
             continue
 
         for match in BIBITEM_PATTERN.finditer(content):
@@ -48,8 +53,7 @@ def extract_raw_references(directory):
             if reference:
                 references.append(reference)
 
-    metrics.inc("raw_references_extracted", len(references))
-    return references
+    return references, files_read_failed
 
 def safe_extract(archive, destination):
   root = destination.resolve()
@@ -90,7 +94,7 @@ def extract_source(tmp_path, staging_dir):
             f"Unsupported source format: {tmp_path}"
         )
 
-    remove_images(staging)
+    return remove_images(staging)
 
 
 def is_gzip_file(path):
@@ -141,12 +145,11 @@ def remove_images(directory):
               Path(root, filename).unlink(missing_ok=True)
               removed += 1
 
-  metrics.inc("files_removed", removed)
+  return removed
 
 
-def extraction_task(item, worker_id):
-    """Extract, validate, and publish one downloaded source."""
-    worker_name = f"extractor-{worker_id}"
+def _extract_item(item, worker_name, track=True):
+    """Extract and publish one source, returning serializable results."""
     task = item["task"]
     tmp_path = item["tmp_path"]
 
@@ -162,89 +165,113 @@ def extraction_task(item, worker_id):
     raw_references = []
     status = "failed"
     stage = "initialization"
+    timings = {}
+    files_removed = 0
+    files_read_failed = 0
+    extracted = False
+    error = None
+    restore_error = None
 
     try:
         # A previously completed extraction can be reused.
         if item["reused"]:
             stage = "reference_extraction"
-            monitor.state(
-                worker_name,
-                "extracting_references",
-                task=task["version_id"],
-            )
+            if track:
+                monitor.state(
+                    worker_name,
+                    "extracting_references",
+                    task=task["version_id"],
+                )
 
-            with metrics.measure("reference_extraction"):
-                raw_references = extract_raw_references(
+            started = time.perf_counter()
+            try:
+                raw_references, files_read_failed = extract_raw_references(
                     destination
+                )
+            finally:
+                timings["reference_extraction"] = (
+                    time.perf_counter() - started
                 )
 
             source_path = relative_source_path(destination)
             status = "success"
-            return
+        else:
+            stage = "extract_archive"
+            if track:
+                monitor.state(
+                    worker_name,
+                    "extracting_archive",
+                    task=task["version_id"],
+                )
 
-        stage = "extract_archive"
-        monitor.state(
-            worker_name,
-            "extracting_archive",
-            task=task["version_id"],
-        )
-
-        staging_dir = tempfile.mkdtemp(
-            prefix=f".{version}-staging-",
-            dir=destination.parent,
-        )
-
-        with metrics.measure("source_extraction"):
-            extract_source(tmp_path, staging_dir)
-
-        stage = "reference_extraction"
-        monitor.state(
-            worker_name,
-            "extracting_references",
-            task=task["version_id"],
-        )
-
-        with metrics.measure("reference_extraction"):
-            raw_references = extract_raw_references(
-                staging_dir
-            )
-
-        # Publish only after extraction and reference scanning
-        # have completed successfully.
-        (Path(staging_dir) / ".complete").touch()
-
-        stage = "publish"
-        monitor.state(
-            worker_name,
-            "publishing_directory",
-            task=task["version_id"],
-        )
-
-        if destination.exists():
-            backup_dir = tempfile.mkdtemp(
-                prefix=f".{version}-backup-",
+            staging_dir = tempfile.mkdtemp(
+                prefix=f".{version}-staging-",
                 dir=destination.parent,
             )
-            os.rmdir(backup_dir)
-            os.replace(destination, backup_dir)
 
-        try:
-            os.replace(staging_dir, destination)
-            staging_dir = None
+            started = time.perf_counter()
+            try:
+                files_removed = extract_source(tmp_path, staging_dir)
+            finally:
+                timings["source_extraction"] = (
+                    time.perf_counter() - started
+                )
 
-        except Exception:
+            stage = "reference_extraction"
+            if track:
+                monitor.state(
+                    worker_name,
+                    "extracting_references",
+                    task=task["version_id"],
+                )
+
+            started = time.perf_counter()
+            try:
+                raw_references, files_read_failed = extract_raw_references(
+                    staging_dir
+                )
+            finally:
+                timings["reference_extraction"] = (
+                    time.perf_counter() - started
+                )
+
+            # Publish only after extraction and reference scanning
+            # have completed successfully.
+            (Path(staging_dir) / ".complete").touch()
+
+            stage = "publish"
+            if track:
+                monitor.state(
+                    worker_name,
+                    "publishing_directory",
+                    task=task["version_id"],
+                )
+
+            if destination.exists():
+                backup_dir = tempfile.mkdtemp(
+                    prefix=f".{version}-backup-",
+                    dir=destination.parent,
+                )
+                os.rmdir(backup_dir)
+                os.replace(destination, backup_dir)
+
+            try:
+                os.replace(staging_dir, destination)
+                staging_dir = None
+
+            except Exception:
+                if backup_dir and os.path.exists(backup_dir):
+                    os.replace(backup_dir, destination)
+                    backup_dir = None
+                raise
+
             if backup_dir and os.path.exists(backup_dir):
-                os.replace(backup_dir, destination)
+                shutil.rmtree(backup_dir, ignore_errors=True)
                 backup_dir = None
-            raise
 
-        if backup_dir and os.path.exists(backup_dir):
-            shutil.rmtree(backup_dir, ignore_errors=True)
-            backup_dir = None
-
-        source_path = relative_source_path(destination)
-        status = "success"
-        metrics.inc("source_extractions_succeeded")
+            source_path = relative_source_path(destination)
+            status = "success"
+            extracted = True
 
     except Exception as exc:
         # If publication fails after the old destination was
@@ -254,38 +281,25 @@ def extraction_task(item, worker_id):
                 try:
                     os.replace(backup_dir, destination)
                     backup_dir = None
-                except OSError:
-                    logger.exception(
-                        "Could not restore backup for %s %s",
-                        arxiv_id,
-                        version,
+                except OSError as restore_exc:
+                    restore_error = (
+                        f"{type(restore_exc).__name__}: {restore_exc}"
                     )
 
         source_path = None
         raw_references = []
         status = "failed"
-
-        log_failure(
-            arxiv_id,
-            f"Source extraction {version}",
-            f"stage={stage}; {format_error(exc)}",
-            exception=exc,
-            details={
-                "version": version,
-                "stage": stage,
-            },
-        )
-
-        metrics.inc("source_versions_failed")
-
-        logger.error(
-            "Extraction failed | paper=%s | version=%s "
-            "| stage=%s | %s",
-            arxiv_id,
-            version,
-            stage,
-            format_error(exc),
-        )
+        error = {
+            "type": type(exc).__name__,
+            "message": format_error(exc),
+            "traceback": "".join(
+                traceback.format_exception(
+                    type(exc),
+                    exc,
+                    exc.__traceback__,
+                )
+            ),
+        }
 
     finally:
         if tmp_path is not None:
@@ -297,13 +311,197 @@ def extraction_task(item, worker_id):
         if backup_dir and os.path.exists(backup_dir):
             shutil.rmtree(backup_dir, ignore_errors=True)
 
-        set_source(
+    return {
+        "arxiv_id": arxiv_id,
+        "version": version,
+        "source_path": source_path,
+        "status": status,
+        "raw_references": raw_references,
+        "timings": timings,
+        "files_removed": files_removed,
+        "files_read_failed": files_read_failed,
+        "extracted": extracted,
+        "error": error,
+        "restore_error": restore_error,
+        "stage": stage,
+    }
+
+
+def _complete_extraction(result):
+    arxiv_id = result["arxiv_id"]
+    version = result["version"]
+
+    metrics.inc("files_removed", result["files_removed"])
+    metrics.inc(
+        "raw_references_extracted",
+        len(result["raw_references"]),
+    )
+    metrics.inc(
+        "reference_files_read_failed",
+        result["files_read_failed"],
+    )
+    for name, elapsed in result["timings"].items():
+        metrics.record_timing(name, elapsed)
+
+    if result["extracted"] and result["status"] == "success":
+        metrics.inc("source_extractions_succeeded")
+
+    error = result["error"]
+    if error is not None:
+        metrics.inc("source_versions_failed")
+        log_failure(
+            arxiv_id,
+            f"Source extraction {version}",
+            f"stage={result['stage']}; {error['message']}",
+            exception_type=error["type"],
+            traceback_text=error["traceback"],
+            details={
+                "version": version,
+                "stage": result["stage"],
+                "restore_error": result["restore_error"],
+            },
+        )
+        logger.error(
+            "Extraction failed | paper=%s | version=%s "
+            "| stage=%s | %s",
             arxiv_id,
             version,
-            source_path,
-            status,
-            raw_references,
+            result["stage"],
+            error["message"],
         )
+
+    set_source(
+        arxiv_id,
+        version,
+        result["source_path"],
+        result["status"],
+        result["raw_references"],
+    )
+
+
+def extraction_task(item, worker_id):
+    """Extract, validate, and publish one downloaded source."""
+    worker_name = f"extractor-{worker_id}"
+    result = _extract_item(item, worker_name)
+    _complete_extraction(result)
+    return result
+
+
+def _finish_process_task(future, worker_id, item, extraction_queue):
+    worker_name = f"extractor-{worker_id}"
+    task = item["task"]
+
+    try:
+        result = future.result()
+        _complete_extraction(result)
+    except Exception as exc:
+        log_failure(
+            task["arxiv_id"],
+            f"Source extraction {task['version']}",
+            format_error(exc),
+            exception=exc,
+            details={
+                "version": task["version"],
+                "worker_id": worker_id,
+                "stage": "process_worker",
+            },
+        )
+        metrics.inc("source_versions_failed")
+        set_source(
+            task["arxiv_id"],
+            task["version"],
+            None,
+            "failed",
+            [],
+        )
+        logger.exception(
+            "Extraction process failed | paper=%s | version=%s",
+            task["arxiv_id"],
+            task["version"],
+        )
+    finally:
+        monitor.state(worker_name, "waiting_for_extraction_task")
+        monitor.completed("extraction_tasks")
+        extraction_queue.task_done()
+
+
+def _initialize_extraction_process(raw_dir):
+    global RAW_DIR
+    RAW_DIR = Path(raw_dir)
+
+
+def process_extraction_worker(
+    extraction_queue,
+    worker_count,
+    raw_dir=RAW_DIR,
+):
+    """Dispatch extraction tasks to child processes and collect results."""
+    logger.info("Started %s extraction processes", worker_count)
+    available_workers = list(range(worker_count))
+    pending = {}
+    stop_count = 0
+
+    with ProcessPoolExecutor(
+        max_workers=worker_count,
+        mp_context=multiprocessing.get_context("spawn"),
+        initializer=_initialize_extraction_process,
+        initargs=(str(raw_dir),),
+    ) as executor:
+        while stop_count < worker_count:
+            item = extraction_queue.get()
+
+            if item is STOP:
+                stop_count += 1
+                extraction_queue.task_done()
+                continue
+
+            while not available_workers:
+                completed, _ = wait(
+                    pending,
+                    return_when=FIRST_COMPLETED,
+                )
+                for future in completed:
+                    worker_id, completed_item = pending.pop(future)
+                    _finish_process_task(
+                        future,
+                        worker_id,
+                        completed_item,
+                        extraction_queue,
+                    )
+                    available_workers.append(worker_id)
+
+            worker_id = available_workers.pop(0)
+            worker_name = f"extractor-{worker_id}"
+            task = item["task"]
+            monitor.state(
+                worker_name,
+                "processing_extraction",
+                task=task["version_id"],
+                backend="process",
+            )
+            future = executor.submit(
+                _extract_item,
+                item,
+                worker_name,
+                False,
+            )
+            pending[future] = (worker_id, item)
+
+        while pending:
+            completed, _ = wait(
+                pending,
+                return_when=FIRST_COMPLETED,
+            )
+            for future in completed:
+                worker_id, item = pending.pop(future)
+                _finish_process_task(
+                    future,
+                    worker_id,
+                    item,
+                    extraction_queue,
+                )
+
+    logger.info("Extraction processes stopped")
 
 
 def extraction_worker(worker_id, extraction_queue):
