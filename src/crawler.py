@@ -35,8 +35,7 @@ def health_report(stop_event, queues):
 
 
 def main():
-    setup_logging(only_logger="pipeline.health")
-
+    setup_logging(only_logger="pipeline")
     metadata_queue = Queue(maxsize=QUEUE_SIZE)
     download_queue = Queue(maxsize=DOWNLOAD_QUEUE_SIZE)
     extraction_queue = Queue(maxsize=EXTRACTION_QUEUE_SIZE)
@@ -138,7 +137,9 @@ def main():
         name="health-monitor",
         daemon=True,
     )
-    health_thread.start()
+
+    if monitor.enabled:
+        health_thread.start()
     producer.start()
 
     producer.join()
@@ -165,8 +166,9 @@ def main():
     metadata_queue.join()
     metadata_thread.join()
 
-    monitor_stop.set()
-    health_thread.join()
+    if monitor.enabled:
+        monitor_stop.set()
+        health_thread.join()
 
     metrics.report()
 

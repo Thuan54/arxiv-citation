@@ -2,6 +2,8 @@ from pathlib import Path
 
 ROOT = Path.cwd()
 
+MONITOR_ENABLED = False
+
 IDS_FILE = ROOT / "data/inputs/arxiv_ids.txt"
 JSONL_FILE = ROOT / "data/metadata/papers.jsonl"
 FAILURES_FILE = ROOT / "data/metadata/failures.jsonl"

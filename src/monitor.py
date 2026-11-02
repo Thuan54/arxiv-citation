@@ -1,10 +1,18 @@
 from datetime import datetime, timezone
+import json
 import threading
 import time
 
+from logger import get_logger
+from config import MONITOR_ENABLED
+
+
+logger = get_logger("pipeline.worker")
+
 
 class PipelineMonitor:
-    def __init__(self):
+    def __init__(self, enabled=MONITOR_ENABLED):
+        self.enabled = enabled
         self._lock = threading.Lock()
         self._started = time.monotonic()
         self._workers = {}
@@ -16,6 +24,9 @@ class PipelineMonitor:
         return datetime.now(timezone.utc).isoformat(timespec="milliseconds")
 
     def state(self, worker, state, task=None, **details):
+        if not self.enabled:
+            return
+
         now = time.monotonic()
         timestamp = self._timestamp()
 
@@ -25,7 +36,13 @@ class PipelineMonitor:
                 previous.get("state") == state
                 and previous.get("task") == task
             )
+            previous_state = previous.get("state")
             previous_task = previous.get("task")
+            previous_state_duration = (
+                round(now - previous["since"], 1)
+                if previous
+                else None
+            )
 
             if task is not None and task != previous_task:
                 task_started_at = timestamp
@@ -54,12 +71,31 @@ class PipelineMonitor:
                 "details": details,
             }
 
+        if not same_operation:
+            logger.info(
+                "WORKER_STATE worker=%s state=%s task=%s "
+                "previous_state=%s previous_state_duration_seconds=%s "
+                "details=%s",
+                worker,
+                state,
+                task if task is not None else previous_task,
+                previous_state,
+                previous_state_duration,
+                json.dumps(details, ensure_ascii=False, sort_keys=True),
+            )
+
     def completed(self, stage):
+        if not self.enabled:
+            return
+
         with self._lock:
             self._completed[stage] = self._completed.get(stage, 0) + 1
             self._last_completion = time.monotonic()
 
     def snapshot(self, queues=None):
+        if not self.enabled:
+            return {}
+
         now = time.monotonic()
 
         with self._lock:
