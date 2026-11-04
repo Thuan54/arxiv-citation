@@ -26,29 +26,70 @@ BIBITEM_PATTERN = re.compile(
 
 logger = get_logger(__name__)
 
+
+def _strip_tex_comments(content):
+    uncommented = []
+
+    for line in content.splitlines(keepends=True):
+        comment_start = None
+
+        for index, character in enumerate(line):
+            if character != "%":
+                continue
+
+            preceding_backslashes = 0
+            cursor = index - 1
+            while cursor >= 0 and line[cursor] == "\\":
+                preceding_backslashes += 1
+                cursor -= 1
+
+            if preceding_backslashes % 2 == 0:
+                comment_start = index
+                break
+
+        if comment_start is not None:
+            newline = "\n" if line.endswith("\n") else ""
+            uncommented.append(line[:comment_start].rstrip("\r\n") + newline)
+        else:
+            uncommented.append(line)
+
+    return "".join(uncommented)
+
+
 def extract_raw_references(directory):
-    """Extract complete raw bibitem entries from TeX files."""
+    """Extract unique raw bibitem entries from TeX and BBL files."""
     directory = Path(directory)
     references = []
+    seen = set()
 
-    for tex_file in sorted(directory.rglob("*.tex")):
+    source_files = sorted(
+        path
+        for path in directory.rglob("*")
+        if path.is_file() and path.suffix.lower() in {".tex", ".bbl"}
+    )
+    for source_file in source_files:
         try:
-            content = tex_file.read_text(
+            content = source_file.read_text(
                 encoding="utf-8",
                 errors="replace",
             )
-        except OSError as exc:
-            # Continue scanning other TeX files.
+        except OSError:
+            # Continue scanning the remaining source files.
             metrics.inc("reference_files_read_failed")
             continue
 
+        content = _strip_tex_comments(content)
         for match in BIBITEM_PATTERN.finditer(content):
             reference = match.group(0).strip()
+            normalized_reference = re.sub(r"\s+", " ", reference)
 
-            if reference:
+            if reference and normalized_reference not in seen:
+                seen.add(normalized_reference)
                 references.append(reference)
 
     metrics.inc("raw_references_extracted", len(references))
+    if not references:
+        metrics.inc("versions_without_references")
     return references
 
 def safe_extract(archive, destination):
