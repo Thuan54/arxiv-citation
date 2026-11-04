@@ -4,11 +4,15 @@ ROOT = Path.cwd()
 
 MONITOR_ENABLED = False
 
+INPUTS_DIR = ROOT /'data/inputs'
+METADATA_DIR   = ROOT / 'data/metadata'
+RAW_DIR = ROOT / "data/raw"
+
 IDS_FILE = ROOT / "data/inputs/arxiv_ids.txt"
 JSONL_FILE = ROOT / "data/metadata/papers.jsonl"
 FAILURES_FILE = ROOT / "data/metadata/failures.jsonl"
 METRICS_FILE = ROOT / "data/metadata/metrics.json"
-RAW_DIR = ROOT / "data/raw"
+
 
 BATCH_SIZE = 50
 

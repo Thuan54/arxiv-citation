@@ -96,7 +96,7 @@ def fetch_metadata_batch(tasks):
                   for node in entry.findall("atom:category", ATOM_NS)
                   if node.get("term")
               ],
-              "submission_date": text_value("published")[:10] or None,
+              "submission_date": text_value("updated")[:10] or None,
           }
 
           set_metadata(arxiv_id, version, metadata, "success")
