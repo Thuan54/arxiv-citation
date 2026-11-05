@@ -65,6 +65,7 @@ def extract_raw_references(directory):
     directory = Path(directory)
     references = []
     files_read_failed = 0
+    seen = set()
 
     source_files = sorted(
         path
