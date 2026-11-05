@@ -1,3 +1,4 @@
+import os
 from pathlib import Path
 
 ROOT = Path.cwd()
@@ -13,7 +14,8 @@ RAW_DIR = ROOT / "data/raw"
 BATCH_SIZE = 50
 
 NUM_DOWNLOADERS = 4
-NUM_EXTRACTORS = 2
+NUM_EXTRACTORS = 4
+EXTRACTOR_BACKEND = "thread" # "thread" or "process"
 
 DOWNLOAD_QUEUE_SIZE =  BATCH_SIZE * 4
 EXTRACTION_QUEUE_SIZE = BATCH_SIZE * 4
