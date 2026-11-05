@@ -38,3 +38,29 @@ python src/generate_ids.py
 # crawl
 python src/crawler.py
 ```
+
+## Milestone 2: parse the LaTeX hierarchy
+
+After the crawler has produced `data/metadata/papers.jsonl` and downloaded
+sources under `data/raw/`, build the processed tables with:
+
+```bash
+python src/parse_corpus.py
+```
+
+The parser follows `\input` and `\include` from the `.tex` file containing
+`\documentclass`, ignores commented-out includes and unused TeX files, and
+writes the Milestone 2 tables to `data/processed/`:
+
+- `elements.jsonl`: deduplicated document, heading, paragraph, sentence,
+  formula, figure/table, and list nodes across versions.
+- `hierarchy.jsonl`: per-version child-to-parent edges.
+- `versions.jsonl`: parsing coverage, including versions with no TeX source,
+  plus the corresponding version's existing `raw_references` from
+  `papers.jsonl`.
+
+The parser is intentionally dependency-free. Review the parsed output for
+papers with custom LaTeX macros or unusual structures before using it as a
+fully normalized corpus. It excludes bibliography sections and bibliography
+commands from hierarchy content; references are taken from the crawler's
+per-version `raw_references` rather than re-extracted from TeX or `.bib` files.
