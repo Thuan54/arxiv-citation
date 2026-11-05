@@ -80,6 +80,7 @@ def main():
     metadata_queue = Queue(maxsize=QUEUE_SIZE)
     download_dispatch_queue = Queue(maxsize=DOWNLOAD_QUEUE_SIZE)
     references_queue = Queue(maxsize=QUEUE_SIZE)
+    download_dispatch_queue = Queue(maxsize=DOWNLOAD_QUEUE_SIZE)
     download_queue = Queue(maxsize=DOWNLOAD_QUEUE_SIZE)
     extraction_queue = Queue(maxsize=EXTRACTION_QUEUE_SIZE)
 
@@ -207,6 +208,7 @@ def main():
                 "metadata": metadata_queue,
                 "download_dispatch": download_dispatch_queue,
                 "semantic_scholar_references": references_queue,
+                "download_dispatch": download_dispatch_queue,
                 "download": download_queue,
                 "extraction": extraction_queue,
             },
