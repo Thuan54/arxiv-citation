@@ -15,7 +15,7 @@ from config import (
     SEMANTIC_SCHOLAR_API_TIMEOUT,
     USER_AGENT,
 )
-from helper import log_failure, parse_versioned_id
+from helper import clean_arxiv_id, log_failure, parse_versioned_id
 from rate_limiter import arxiv_limiter
 
 
@@ -123,6 +123,18 @@ def build_papers_table(records):
 
 def extract_citation_arxiv_ids(raw_reference):
     identifiers = []
+    try:
+        semantic_reference = json.loads(raw_reference)
+    except (TypeError, json.JSONDecodeError):
+        semantic_reference = None
+
+    if isinstance(semantic_reference, dict):
+        cited_paper = semantic_reference.get("citedPaper") or {}
+        external_ids = cited_paper.get("externalIds") or {}
+        arxiv_id = external_ids.get("ArXiv") or external_ids.get("arXiv")
+        if arxiv_id:
+            identifiers.append(clean_arxiv_id(str(arxiv_id)))
+
     for pattern in ARXIV_ID_PATTERNS:
         for match in pattern.finditer(raw_reference):
             arxiv_id = match.group("id")

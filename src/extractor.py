@@ -3,7 +3,6 @@ import gzip
 import multiprocessing
 import tarfile
 from pathlib import Path
-import re
 import tempfile
 import os
 import shutil
@@ -20,79 +19,7 @@ from state import set_source
 from logger import get_logger
 
 
-BIBITEM_PATTERN = re.compile(
-    r"\\bibitem(?:\s*\[[^\]]*\])?\s*\{[^}]*\}"
-    r".*?"
-    r"(?=\\bibitem(?:\s*\[[^\]]*\])?\s*\{"
-    r"|\\end\s*\{thebibliography\}|$)",
-    re.DOTALL,
-)
-
 logger = get_logger(__name__)
-
-
-def _strip_tex_comments(content):
-    uncommented = []
-
-    for line in content.splitlines(keepends=True):
-        comment_start = None
-
-        for index, character in enumerate(line):
-            if character != "%":
-                continue
-
-            preceding_backslashes = 0
-            cursor = index - 1
-            while cursor >= 0 and line[cursor] == "\\":
-                preceding_backslashes += 1
-                cursor -= 1
-
-            if preceding_backslashes % 2 == 0:
-                comment_start = index
-                break
-
-        if comment_start is not None:
-            newline = "\n" if line.endswith("\n") else ""
-            uncommented.append(line[:comment_start].rstrip("\r\n") + newline)
-        else:
-            uncommented.append(line)
-
-    return "".join(uncommented)
-
-
-def extract_raw_references(directory):
-    """Extract unique raw bibitem entries from TeX and BBL files."""
-    directory = Path(directory)
-    references = []
-    files_read_failed = 0
-    seen = set()
-
-    source_files = sorted(
-        path
-        for path in directory.rglob("*")
-        if path.is_file() and path.suffix.lower() in {".tex", ".bbl"}
-    )
-    for source_file in source_files:
-        try:
-            content = source_file.read_text(
-                encoding="utf-8",
-                errors="replace",
-            )
-        except OSError:
-            # Continue scanning other TeX files.
-            files_read_failed += 1
-            continue
-
-        content = _strip_tex_comments(content)
-        for match in BIBITEM_PATTERN.finditer(content):
-            reference = match.group(0).strip()
-            normalized_reference = re.sub(r"\s+", " ", reference)
-
-            if reference and normalized_reference not in seen:
-                seen.add(normalized_reference)
-                references.append(reference)
-
-    return references, files_read_failed
 
 def safe_extract(archive, destination):
   root = destination.resolve()
@@ -201,7 +128,6 @@ def _extract_item(item, worker_name, track=True):
     staging_dir = None
     backup_dir = None
     source_path = None
-    raw_references = []
     status = "failed"
     stage = "initialization"
     timings = {}
@@ -214,24 +140,6 @@ def _extract_item(item, worker_name, track=True):
     try:
         # A previously completed extraction can be reused.
         if item["reused"]:
-            stage = "reference_extraction"
-            if track:
-                monitor.state(
-                    worker_name,
-                    "extracting_references",
-                    task=task["version_id"],
-                )
-
-            started = time.perf_counter()
-            try:
-                raw_references, files_read_failed = extract_raw_references(
-                    destination
-                )
-            finally:
-                timings["reference_extraction"] = (
-                    time.perf_counter() - started
-                )
-
             source_path = relative_source_path(destination)
             status = "success"
         else:
@@ -256,27 +164,8 @@ def _extract_item(item, worker_name, track=True):
                     time.perf_counter() - started
                 )
 
-            stage = "reference_extraction"
-            if track:
-                monitor.state(
-                    worker_name,
-                    "extracting_references",
-                    task=task["version_id"],
-                )
-
-            started = time.perf_counter()
-            try:
-                raw_references, files_read_failed = extract_raw_references(
-                    staging_dir
-                )
-            finally:
-                timings["reference_extraction"] = (
-                    time.perf_counter() - started
-                )
-
-            # Publish only after extraction and reference scanning
-            # have completed successfully.
-            (Path(staging_dir) / ".complete").touch()
+        # Publish only after the archive has been safely extracted.
+        (Path(staging_dir) / ".complete").touch()
 
             stage = "publish"
             if track:
@@ -326,7 +215,6 @@ def _extract_item(item, worker_name, track=True):
                     )
 
         source_path = None
-        raw_references = []
         status = "failed"
         error = {
             "type": type(exc).__name__,
@@ -405,142 +293,9 @@ def _complete_extraction(result):
             "| stage=%s | %s",
             arxiv_id,
             version,
-            result["stage"],
-            error["message"],
+            source_path,
+            status,
         )
-
-    set_source(
-        arxiv_id,
-        version,
-        result["source_path"],
-        result["status"],
-        result["raw_references"],
-    )
-
-
-def extraction_task(item, worker_id):
-    """Extract, validate, and publish one downloaded source."""
-    worker_name = f"extractor-{worker_id}"
-    result = _extract_item(item, worker_name)
-    _complete_extraction(result)
-    return result
-
-
-def _finish_process_task(future, worker_id, item, extraction_queue):
-    worker_name = f"extractor-{worker_id}"
-    task = item["task"]
-
-    try:
-        result = future.result()
-        _complete_extraction(result)
-    except Exception as exc:
-        log_failure(
-            task["arxiv_id"],
-            f"Source extraction {task['version']}",
-            format_error(exc),
-            exception=exc,
-            details={
-                "version": task["version"],
-                "worker_id": worker_id,
-                "stage": "process_worker",
-            },
-        )
-        metrics.inc("source_versions_failed")
-        set_source(
-            task["arxiv_id"],
-            task["version"],
-            None,
-            "failed",
-            [],
-        )
-        logger.exception(
-            "Extraction process failed | paper=%s | version=%s",
-            task["arxiv_id"],
-            task["version"],
-        )
-    finally:
-        monitor.state(worker_name, "waiting_for_extraction_task")
-        monitor.completed("extraction_tasks")
-        extraction_queue.task_done()
-
-
-def _initialize_extraction_process(raw_dir):
-    global RAW_DIR
-    RAW_DIR = Path(raw_dir)
-
-
-def process_extraction_worker(
-    extraction_queue,
-    worker_count,
-    raw_dir=RAW_DIR,
-):
-    """Dispatch extraction tasks to child processes and collect results."""
-    logger.info("Started %s extraction processes", worker_count)
-    available_workers = list(range(worker_count))
-    pending = {}
-    stop_count = 0
-
-    with ProcessPoolExecutor(
-        max_workers=worker_count,
-        mp_context=multiprocessing.get_context("spawn"),
-        initializer=_initialize_extraction_process,
-        initargs=(str(raw_dir),),
-    ) as executor:
-        while stop_count < worker_count:
-            item = extraction_queue.get()
-
-            if item is STOP:
-                stop_count += 1
-                extraction_queue.task_done()
-                continue
-
-            while not available_workers:
-                completed, _ = wait(
-                    pending,
-                    return_when=FIRST_COMPLETED,
-                )
-                for future in completed:
-                    worker_id, completed_item = pending.pop(future)
-                    _finish_process_task(
-                        future,
-                        worker_id,
-                        completed_item,
-                        extraction_queue,
-                    )
-                    available_workers.append(worker_id)
-
-            worker_id = available_workers.pop(0)
-            worker_name = f"extractor-{worker_id}"
-            task = item["task"]
-            monitor.state(
-                worker_name,
-                "processing_extraction",
-                task=task["version_id"],
-                backend="process",
-            )
-            future = executor.submit(
-                _extract_item,
-                item,
-                worker_name,
-                False,
-            )
-            pending[future] = (worker_id, item)
-
-        while pending:
-            completed, _ = wait(
-                pending,
-                return_when=FIRST_COMPLETED,
-            )
-            for future in completed:
-                worker_id, item = pending.pop(future)
-                _finish_process_task(
-                    future,
-                    worker_id,
-                    item,
-                    extraction_queue,
-                )
-
-    logger.info("Extraction processes stopped")
 
 
 def extraction_worker(worker_id, extraction_queue):

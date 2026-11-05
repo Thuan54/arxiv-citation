@@ -22,11 +22,13 @@ def initialize_paper(arxiv_id, versions):
                     "latex_source_path": None,
                     "raw_references": [],
                     "source_status": None,
+                    "reference_status": None,
                 }
                 for version in versions
             },
             "metadata_done": set(),
             "source_done": set(),
+            "references_done": set(),
         }
 
 
@@ -41,6 +43,7 @@ def _finish_if_ready(arxiv_id):
     if (
         paper["metadata_done"] != expected
         or paper["source_done"] != expected
+        or paper["references_done"] != expected
     ):
         return None
 
@@ -98,7 +101,6 @@ def set_source(
     version,
     path,
     status=None,
-    raw_references=None,
 ):
     with _lock:
         paper = _papers.get(arxiv_id)
@@ -108,9 +110,28 @@ def set_source(
 
         item = paper["versions"][version]
         item["latex_source_path"] = path
-        item["raw_references"] = raw_references or []
         item["source_status"] = status
         paper["source_done"].add(version)
+
+        record = _finish_if_ready(arxiv_id)
+
+    if record is not None:
+        _write_record(record)
+
+
+def set_references(arxiv_id, references, status):
+    with _lock:
+        paper = _papers.get(arxiv_id)
+        if paper is None:
+            return
+
+        for version in paper["expected"]:
+            item = paper["versions"][version]
+            item["reference_status"] = status
+            if references:
+                item["raw_references"] = references
+                item["reference_source"] = "semantic_scholar"
+            paper["references_done"].add(version)
 
         record = _finish_if_ready(arxiv_id)
 
