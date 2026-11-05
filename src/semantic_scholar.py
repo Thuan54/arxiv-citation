@@ -1,6 +1,8 @@
 import json
 import threading
 import time
+from datetime import datetime, timezone
+from email.utils import parsedate_to_datetime
 from queue import Empty
 
 import requests
@@ -9,7 +11,9 @@ from config import (
     SEMANTIC_SCHOLAR_API_KEY,
     SEMANTIC_SCHOLAR_API_TIMEOUT,
     SEMANTIC_SCHOLAR_BATCH_WAIT,
+    SEMANTIC_SCHOLAR_MAX_RETRIES,
     SEMANTIC_SCHOLAR_REFERENCE_PAGE_SIZE,
+    SEMANTIC_SCHOLAR_RETRY_BACKOFF,
     SEMANTIC_SCHOLAR_REQUEST_INTERVAL,
     BATCH_SIZE,
 )
@@ -53,21 +57,65 @@ class SemanticScholarReferenceWorker:
             return {"x-api-key": SEMANTIC_SCHOLAR_API_KEY}
         return {}
 
-    def fetch_references_batch(self, arxiv_ids, session):
+    def _retry_delay(self, response, retry_number):
+        retry_after = response.headers.get("Retry-After")
+        if retry_after:
+            try:
+                return max(0.0, float(retry_after))
+            except ValueError:
+                try:
+                    retry_at = parsedate_to_datetime(retry_after)
+                    if retry_at.tzinfo is None:
+                        retry_at = retry_at.replace(tzinfo=timezone.utc)
+                    return max(
+                        0.0,
+                        (retry_at - datetime.now(timezone.utc)).total_seconds(),
+                    )
+                except (TypeError, ValueError, OverflowError):
+                    pass
+
+        return SEMANTIC_SCHOLAR_RETRY_BACKOFF * (2 ** (retry_number - 1))
+
+    def _request(self, method, url, session, **kwargs):
         with self._request_lock:
-            self._wait_for_request_slot()
-            response = session.post(
-                PAPER_BATCH_URL,
-                params={"fields": REFERENCE_FIELDS},
-                json={
-                    "ids": [f"ARXIV:{arxiv_id}" for arxiv_id in arxiv_ids]
-                },
-                timeout=SEMANTIC_SCHOLAR_API_TIMEOUT,
-                headers=self._request_headers(),
-            )
-            self._last_request_started = time.monotonic()
-            response.raise_for_status()
-            payload = response.json()
+            for attempt in range(SEMANTIC_SCHOLAR_MAX_RETRIES + 1):
+                self._wait_for_request_slot()
+                response = getattr(session, method)(
+                    url,
+                    **kwargs,
+                )
+                self._last_request_started = time.monotonic()
+
+                if response.status_code != 429:
+                    response.raise_for_status()
+                    return response
+
+                if attempt == SEMANTIC_SCHOLAR_MAX_RETRIES:
+                    response.raise_for_status()
+
+                delay = self._retry_delay(response, attempt + 1)
+                logger.warning(
+                    "Semantic Scholar rate limited request; retry %s/%s "
+                    "in %.1f seconds",
+                    attempt + 1,
+                    SEMANTIC_SCHOLAR_MAX_RETRIES,
+                    delay,
+                )
+                time.sleep(delay)
+
+    def fetch_references_batch(self, arxiv_ids, session):
+        response = self._request(
+            "post",
+            PAPER_BATCH_URL,
+            session,
+            params={"fields": REFERENCE_FIELDS},
+            json={
+                "ids": [f"ARXIV:{arxiv_id}" for arxiv_id in arxiv_ids]
+            },
+            timeout=SEMANTIC_SCHOLAR_API_TIMEOUT,
+            headers=self._request_headers(),
+        )
+        payload = response.json()
 
         if not isinstance(payload, list) or len(payload) != len(arxiv_ids):
             raise ValueError(
@@ -116,28 +164,25 @@ class SemanticScholarReferenceWorker:
         return results
 
     def _get_page(self, session, arxiv_id, offset):
-        with self._request_lock:
-            self._wait_for_request_slot()
-
-            response = session.get(
-                PAPER_REFERENCES_URL.format(arxiv_id=arxiv_id),
-                params={
-                    "offset": offset,
-                    "limit": SEMANTIC_SCHOLAR_REFERENCE_PAGE_SIZE,
-                    "fields": (
-                        "contexts,intents,isInfluential,"
-                        "citedPaper.paperId,citedPaper.externalIds,"
-                        "citedPaper.title,citedPaper.authors,"
-                        "citedPaper.year,citedPaper.venue,"
-                        "citedPaper.publicationDate"
-                    ),
-                },
-                timeout=SEMANTIC_SCHOLAR_API_TIMEOUT,
-                headers=self._request_headers(),
-            )
-            self._last_request_started = time.monotonic()
-            response.raise_for_status()
-            payload = response.json()
+        response = self._request(
+            "get",
+            PAPER_REFERENCES_URL.format(arxiv_id=arxiv_id),
+            session,
+            params={
+                "offset": offset,
+                "limit": SEMANTIC_SCHOLAR_REFERENCE_PAGE_SIZE,
+                "fields": (
+                    "contexts,intents,isInfluential,"
+                    "citedPaper.paperId,citedPaper.externalIds,"
+                    "citedPaper.title,citedPaper.authors,"
+                    "citedPaper.year,citedPaper.venue,"
+                    "citedPaper.publicationDate"
+                ),
+            },
+            timeout=SEMANTIC_SCHOLAR_API_TIMEOUT,
+            headers=self._request_headers(),
+        )
+        payload = response.json()
 
         if not isinstance(payload, dict):
             raise ValueError(
