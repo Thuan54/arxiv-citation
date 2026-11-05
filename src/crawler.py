@@ -150,11 +150,6 @@ def main():
         args=(metadata_queue,),
         name="metadata-worker",
     )
-    references_thread = threading.Thread(
-        target=semantic_scholar_reference_worker,
-        args=(references_queue,),
-        name="semantic-scholar-reference-worker",
-    )
 
     references_thread = threading.Thread(
         target=references_worker,
