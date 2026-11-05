@@ -11,6 +11,7 @@ from state import set_metadata
 
 API_URL = "https://export.arxiv.org/api/query"
 ATOM_NS = {"atom": "http://www.w3.org/2005/Atom"}
+ARXIV_NS = {"arxiv": "http://arxiv.org/schemas/atom"}
 logger = get_logger(__name__)
 
 def fetch_metadata_batch(tasks):
@@ -97,6 +98,14 @@ def fetch_metadata_batch(tasks):
                   if node.get("term")
               ],
               "submission_date": text_value("published")[:10] or None,
+              "updated_date": text_value("updated")[:10] or None,
+              "venue": (
+                  journal_ref.text.strip()
+                  if (journal_ref := entry.find(
+                      "arxiv:journal_ref", ARXIV_NS
+                  )) is not None and journal_ref.text
+                  else None
+              ),
           }
 
           set_metadata(arxiv_id, version, metadata, "success")

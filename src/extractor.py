@@ -46,17 +46,15 @@ def _strip_tex_comments(content):
             while cursor >= 0 and line[cursor] == "\\":
                 preceding_backslashes += 1
                 cursor -= 1
-
             if preceding_backslashes % 2 == 0:
                 comment_start = index
                 break
 
-        if comment_start is not None:
+        if comment_start is None:
+            uncommented.append(line)
+        else:
             newline = "\n" if line.endswith("\n") else ""
             uncommented.append(line[:comment_start].rstrip("\r\n") + newline)
-        else:
-            uncommented.append(line)
-
     return "".join(uncommented)
 
 
