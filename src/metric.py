@@ -6,7 +6,7 @@ from collections import defaultdict
 from contextlib import contextmanager
 from pathlib import Path
 
-from config import METRICS_FILE
+from config import METRICS_FILE, NUM_EXTRACTORS
 from logger import get_logger
 
 logger = get_logger(__name__)
@@ -42,6 +42,13 @@ class Metrics:
         with self.lock:
             self.counts[name] += amount
 
+    def record_timing(self, name, elapsed):
+        with self.lock:
+            stats = self.timings[name]
+            stats["calls"] += 1
+            stats["total"] += elapsed
+            stats["max"] = max(stats["max"], elapsed)
+
     def report(self):
         elapsed = time.perf_counter() - self.started
 
@@ -62,6 +69,8 @@ class Metrics:
 
         result = {
             "elapsed_seconds": round(elapsed, 3),
+            "extractor_backend": "thread",
+            "extractor_workers": NUM_EXTRACTORS,
             "counters": counts,
             "timings": timings,
         }

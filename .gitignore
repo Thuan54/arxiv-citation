@@ -1,1 +1,18 @@
-src/data/raw
+# Enviroment
+.venv
+venv
+.env
+# data
+data
+
+# Sandbox
+sandbox
+
+# cache
+__pycache__
+
+# arxiv-jupyter-book
+arxiv-jupyter-book
+
+# note
+note
