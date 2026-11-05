@@ -12,7 +12,7 @@ from downloader import (
     downloader_worker,
     STOP,
 )
-from extractor import extraction_worker
+from extractor import extraction_worker, process_extraction_worker
 from export_tables import export_tables
 from metadata import metadata_worker
 from metric import metrics
