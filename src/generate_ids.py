@@ -6,7 +6,7 @@ from pathlib import Path
 
 import requests
 
-from config import INPUTS_DIR, IDS_FILE, API_TIMEOUT, USER_AGENT
+from config import IDS_FILE, API_TIMEOUT, USER_AGENT
 
 
 API_URL = "https://export.arxiv.org/api/query"
@@ -100,12 +100,10 @@ def generate_arxiv_ids(
 
 
 if __name__ == '__main__':
-    os.makedirs(INPUTS_DIR, exist_ok=True)
-
     generate_arxiv_ids(
-        start_id=3001,
-        start_month='2024-09',
-        end_id=3595,
-        end_month='2024-09',
+        start_id=16045,
+        start_month='2024-08',
+        end_id=16100,
+        end_month='2024-08',
         output_path=IDS_FILE
     )
