@@ -1,6 +1,4 @@
-from concurrent.futures import FIRST_COMPLETED, ProcessPoolExecutor, wait
 import gzip
-import multiprocessing
 import tarfile
 from pathlib import Path
 import tempfile
@@ -164,9 +162,8 @@ def _extract_item(item, worker_name, track=True):
                     time.perf_counter() - started
                 )
 
-        # Publish only after the archive has been safely extracted.
-        (Path(staging_dir) / ".complete").touch()
-
+            # Publish only after the archive has been safely extracted.
+            (Path(staging_dir) / ".complete").touch()
             stage = "publish"
             if track:
                 monitor.state(
@@ -243,7 +240,7 @@ def _extract_item(item, worker_name, track=True):
         "version": version,
         "source_path": source_path,
         "status": status,
-        "raw_references": raw_references,
+        "raw_references": [],
         "timings": timings,
         "files_removed": files_removed,
         "files_read_failed": files_read_failed,
@@ -258,6 +255,12 @@ def _complete_extraction(result):
     arxiv_id = result["arxiv_id"]
     version = result["version"]
 
+    set_source(
+        arxiv_id,
+        version,
+        result["source_path"],
+        result["status"],
+    )
     metrics.inc("files_removed", result["files_removed"])
     metrics.inc(
         "raw_references_extracted",
@@ -293,9 +296,16 @@ def _complete_extraction(result):
             "| stage=%s | %s",
             arxiv_id,
             version,
-            source_path,
-            status,
+            result["stage"],
+            error["message"],
         )
+
+
+def extraction_task(item, worker_id=0):
+    """Extract one downloaded source and update pipeline state."""
+    worker_name = f"extractor-{worker_id}"
+    result = _extract_item(item, worker_name)
+    _complete_extraction(result)
 
 
 def extraction_worker(worker_id, extraction_queue):

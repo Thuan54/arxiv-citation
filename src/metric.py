@@ -6,7 +6,7 @@ from collections import defaultdict
 from contextlib import contextmanager
 from pathlib import Path
 
-from config import EXTRACTOR_BACKEND, METRICS_FILE, NUM_EXTRACTORS
+from config import METRICS_FILE, NUM_EXTRACTORS
 from logger import get_logger
 
 logger = get_logger(__name__)
@@ -69,7 +69,7 @@ class Metrics:
 
         result = {
             "elapsed_seconds": round(elapsed, 3),
-            "extractor_backend": EXTRACTOR_BACKEND,
+            "extractor_backend": "thread",
             "extractor_workers": NUM_EXTRACTORS,
             "counters": counts,
             "timings": timings,
