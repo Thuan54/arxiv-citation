@@ -18,6 +18,7 @@ def initialize_paper(arxiv_id, versions):
                 version: {
                     "version": version,
                     "metadata": None,
+                    "metadata_status": None,
                     "latex_source_path": None,
                     "raw_references": [],
                     # Crawled from Semantic Scholar; null = crawl failed or
@@ -109,6 +110,7 @@ def set_metadata(arxiv_id, version, metadata, status=None):
             return
 
         paper["versions"][version]["metadata"] = metadata
+        paper["versions"][version]["metadata_status"] = status
         paper["metadata_done"].add(version)
 
         record = _finish_if_ready(arxiv_id)
@@ -122,7 +124,6 @@ def set_source(
     version,
     path,
     status=None,
-    raw_references=None,
 ):
     with _lock:
         paper = _papers.get(arxiv_id)
@@ -132,7 +133,7 @@ def set_source(
 
         item = paper["versions"][version]
         item["latex_source_path"] = path
-        item["raw_references"] = raw_references or []
+        item["source_status"] = status
         paper["source_done"].add(version)
 
         record = _finish_if_ready(arxiv_id)

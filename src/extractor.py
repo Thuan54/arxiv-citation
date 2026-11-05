@@ -416,7 +416,7 @@ def extract_source(tmp_path, staging_dir):
             f"Unsupported source format: {tmp_path}"
         )
 
-    remove_images(staging)
+    return remove_images(staging)
 
 
 def is_gzip_file(path):
@@ -466,13 +466,14 @@ def remove_images(directory):
             if Path(filename).suffix.lower() in IMAGE_EXTENSIONS:
                 Path(root, filename).unlink(missing_ok=True)
                 removed += 1
-
+  
     metrics.inc("files_removed", removed)
+    return removed
+    
 
 
-def extraction_task(item, worker_id):
-    """Extract, validate, and publish one downloaded source."""
-    worker_name = f"extractor-{worker_id}"
+def _extract_item(item, worker_name, track=True):
+    """Extract and publish one source, returning serializable results."""
     task = item["task"]
     tmp_path = item["tmp_path"]
 
@@ -485,9 +486,14 @@ def extraction_task(item, worker_id):
     staging_dir = None
     backup_dir = None
     source_path = None
-    raw_references = []
     status = "failed"
     stage = "initialization"
+    timings = {}
+    files_removed = 0
+    files_read_failed = 0
+    extracted = False
+    error = None
+    restore_error = None
 
     try:
         # A previously completed extraction can be reused.
@@ -503,68 +509,64 @@ def extraction_task(item, worker_id):
 
             source_path = relative_source_path(destination)
             status = "success"
-            return
+        else:
+            stage = "extract_archive"
+            if track:
+                monitor.state(
+                    worker_name,
+                    "extracting_archive",
+                    task=task["version_id"],
+                )
 
-        stage = "extract_archive"
-        monitor.state(
-            worker_name,
-            "extracting_archive",
-            task=task["version_id"],
-        )
-
-        staging_dir = tempfile.mkdtemp(
-            prefix=f".{version}-staging-",
-            dir=destination.parent,
-        )
-
-        with metrics.measure("source_extraction"):
-            extract_source(tmp_path, staging_dir)
-
-        stage = "reference_extraction"
-        monitor.state(
-            worker_name,
-            "extracting_references",
-            task=task["version_id"],
-        )
-
-        raw_references = scan_references(staging_dir, task)
-
-        # Publish only after extraction and reference scanning
-        # have completed successfully.
-        (Path(staging_dir) / ".complete").touch()
-
-        stage = "publish"
-        monitor.state(
-            worker_name,
-            "publishing_directory",
-            task=task["version_id"],
-        )
-
-        if destination.exists():
-            backup_dir = tempfile.mkdtemp(
-                prefix=f".{version}-backup-",
+            staging_dir = tempfile.mkdtemp(
+                prefix=f".{version}-staging-",
                 dir=destination.parent,
             )
-            os.rmdir(backup_dir)
-            os.replace(destination, backup_dir)
+        raw_references = scan_references(staging_dir, task)
 
-        try:
-            os.replace(staging_dir, destination)
-            staging_dir = None
+            started = time.perf_counter()
+            try:
+                files_removed = extract_source(tmp_path, staging_dir)
+            finally:
+                timings["source_extraction"] = (
+                    time.perf_counter() - started
+                )
 
-        except Exception:
+            # Publish only after the archive has been safely extracted.
+            (Path(staging_dir) / ".complete").touch()
+            stage = "publish"
+            if track:
+                monitor.state(
+                    worker_name,
+                    "publishing_directory",
+                    task=task["version_id"],
+                )
+
+            if destination.exists():
+                backup_dir = tempfile.mkdtemp(
+                    prefix=f".{version}-backup-",
+                    dir=destination.parent,
+                )
+                os.rmdir(backup_dir)
+                os.replace(destination, backup_dir)
+
+            try:
+                os.replace(staging_dir, destination)
+                staging_dir = None
+
+            except Exception:
+                if backup_dir and os.path.exists(backup_dir):
+                    os.replace(backup_dir, destination)
+                    backup_dir = None
+                raise
+
             if backup_dir and os.path.exists(backup_dir):
-                os.replace(backup_dir, destination)
+                shutil.rmtree(backup_dir, ignore_errors=True)
                 backup_dir = None
-            raise
 
-        if backup_dir and os.path.exists(backup_dir):
-            shutil.rmtree(backup_dir, ignore_errors=True)
-            backup_dir = None
-
-        source_path = relative_source_path(destination)
-        status = "success"
-        metrics.inc("source_extractions_succeeded")
+            source_path = relative_source_path(destination)
+            status = "success"
+            extracted = True
 
     except Exception as exc:
         # If publication fails after the old destination was
@@ -574,38 +576,24 @@ def extraction_task(item, worker_id):
                 try:
                     os.replace(backup_dir, destination)
                     backup_dir = None
-                except OSError:
-                    logger.exception(
-                        "Could not restore backup for %s %s",
-                        arxiv_id,
-                        version,
+                except OSError as restore_exc:
+                    restore_error = (
+                        f"{type(restore_exc).__name__}: {restore_exc}"
                     )
 
         source_path = None
-        raw_references = []
         status = "failed"
-
-        log_failure(
-            arxiv_id,
-            f"Source extraction {version}",
-            f"stage={stage}; {format_error(exc)}",
-            exception=exc,
-            details={
-                "version": version,
-                "stage": stage,
-            },
-        )
-
-        metrics.inc("source_versions_failed")
-
-        logger.error(
-            "Extraction failed | paper=%s | version=%s "
-            "| stage=%s | %s",
-            arxiv_id,
-            version,
-            stage,
-            format_error(exc),
-        )
+        error = {
+            "type": type(exc).__name__,
+            "message": format_error(exc),
+            "traceback": "".join(
+                traceback.format_exception(
+                    type(exc),
+                    exc,
+                    exc.__traceback__,
+                )
+            ),
+        }
 
     finally:
         if tmp_path is not None:
@@ -617,13 +605,77 @@ def extraction_task(item, worker_id):
         if backup_dir and os.path.exists(backup_dir):
             shutil.rmtree(backup_dir, ignore_errors=True)
 
-        set_source(
+    return {
+        "arxiv_id": arxiv_id,
+        "version": version,
+        "source_path": source_path,
+        "status": status,
+        "raw_references": [],
+        "timings": timings,
+        "files_removed": files_removed,
+        "files_read_failed": files_read_failed,
+        "extracted": extracted,
+        "error": error,
+        "restore_error": restore_error,
+        "stage": stage,
+    }
+
+
+def _complete_extraction(result):
+    arxiv_id = result["arxiv_id"]
+    version = result["version"]
+
+    set_source(
+        arxiv_id,
+        version,
+        result["source_path"],
+        result["status"],
+    )
+    metrics.inc("files_removed", result["files_removed"])
+    metrics.inc(
+        "raw_references_extracted",
+        len(result["raw_references"]),
+    )
+    metrics.inc(
+        "reference_files_read_failed",
+        result["files_read_failed"],
+    )
+    for name, elapsed in result["timings"].items():
+        metrics.record_timing(name, elapsed)
+
+    if result["extracted"] and result["status"] == "success":
+        metrics.inc("source_extractions_succeeded")
+
+    error = result["error"]
+    if error is not None:
+        metrics.inc("source_versions_failed")
+        log_failure(
+            arxiv_id,
+            f"Source extraction {version}",
+            f"stage={result['stage']}; {error['message']}",
+            exception_type=error["type"],
+            traceback_text=error["traceback"],
+            details={
+                "version": version,
+                "stage": result["stage"],
+                "restore_error": result["restore_error"],
+            },
+        )
+        logger.error(
+            "Extraction failed | paper=%s | version=%s "
+            "| stage=%s | %s",
             arxiv_id,
             version,
-            source_path,
-            status,
-            raw_references,
+            result["stage"],
+            error["message"],
         )
+
+
+def extraction_task(item, worker_id=0):
+    """Extract one downloaded source and update pipeline state."""
+    worker_name = f"extractor-{worker_id}"
+    result = _extract_item(item, worker_name)
+    _complete_extraction(result)
 
 
 def extraction_worker(worker_id, extraction_queue):

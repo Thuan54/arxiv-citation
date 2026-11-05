@@ -253,7 +253,6 @@ def download_task(worker_id, task, extraction_queue, session):
             version,
             None,
             "failed",
-            [],
         )
 
         logger.error(
