@@ -5,6 +5,8 @@ import re
 import shutil
 import tarfile
 import tempfile
+import time
+import traceback
 from collections import Counter
 from pathlib import Path
 
@@ -14,7 +16,7 @@ from helper import log_failure, format_error, relative_source_path
 from logger import get_logger
 from metric import metrics
 from monitor import monitor
-from state import set_source
+from state import set_raw_references, set_source
 
 
 logger = get_logger(__name__)
@@ -490,7 +492,7 @@ def _extract_item(item, worker_name, track=True):
     stage = "initialization"
     timings = {}
     files_removed = 0
-    files_read_failed = 0
+    raw_references = []
     extracted = False
     error = None
     restore_error = None
@@ -522,7 +524,6 @@ def _extract_item(item, worker_name, track=True):
                 prefix=f".{version}-staging-",
                 dir=destination.parent,
             )
-        raw_references = scan_references(staging_dir, task)
 
             started = time.perf_counter()
             try:
@@ -531,6 +532,15 @@ def _extract_item(item, worker_name, track=True):
                 timings["source_extraction"] = (
                     time.perf_counter() - started
                 )
+
+            stage = "reference_extraction"
+            if track:
+                monitor.state(
+                    worker_name,
+                    "extracting_references",
+                    task=task["version_id"],
+                )
+            raw_references = scan_references(staging_dir, task)
 
             # Publish only after the archive has been safely extracted.
             (Path(staging_dir) / ".complete").touch()
@@ -610,10 +620,9 @@ def _extract_item(item, worker_name, track=True):
         "version": version,
         "source_path": source_path,
         "status": status,
-        "raw_references": [],
+        "raw_references": raw_references,
         "timings": timings,
         "files_removed": files_removed,
-        "files_read_failed": files_read_failed,
         "extracted": extracted,
         "error": error,
         "restore_error": restore_error,
@@ -625,6 +634,11 @@ def _complete_extraction(result):
     arxiv_id = result["arxiv_id"]
     version = result["version"]
 
+    set_raw_references(
+        arxiv_id,
+        version,
+        result["raw_references"],
+    )
     set_source(
         arxiv_id,
         version,
@@ -632,14 +646,6 @@ def _complete_extraction(result):
         result["status"],
     )
     metrics.inc("files_removed", result["files_removed"])
-    metrics.inc(
-        "raw_references_extracted",
-        len(result["raw_references"]),
-    )
-    metrics.inc(
-        "reference_files_read_failed",
-        result["files_read_failed"],
-    )
     for name, elapsed in result["timings"].items():
         metrics.record_timing(name, elapsed)
 
