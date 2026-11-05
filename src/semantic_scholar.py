@@ -1,316 +1,375 @@
-import json
+"""Crawl reference metadata from the Semantic Scholar Graph API.
+
+Papers are resolved in batches through POST /graph/v1/paper/batch (up to 500
+ids per request) instead of one GET per paper, so a crawl needs a small
+fraction of the requests and stays inside the rate limits.
+
+Semantic Scholar keeps a single reference list per arXiv paper and does not
+distinguish versions, so one lookup per paper is attached to every version
+when the record is written.
+"""
+import queue
 import threading
 import time
-from datetime import datetime, timezone
-from email.utils import parsedate_to_datetime
-from queue import Empty
 
 import requests
 
 from config import (
-    SEMANTIC_SCHOLAR_API_KEY,
-    SEMANTIC_SCHOLAR_API_TIMEOUT,
-    SEMANTIC_SCHOLAR_BATCH_WAIT,
-    SEMANTIC_SCHOLAR_MAX_RETRIES,
-    SEMANTIC_SCHOLAR_REFERENCE_PAGE_SIZE,
-    SEMANTIC_SCHOLAR_RETRY_BACKOFF,
-    SEMANTIC_SCHOLAR_REQUEST_INTERVAL,
-    BATCH_SIZE,
+    S2_API_KEY, S2_MAX_ATTEMPTS, S2_MIN_INTERVAL, S2_TIMEOUT, USER_AGENT,
 )
 from downloader import STOP
-from helper import log_failure
+from helper import format_error, log_failure
 from logger import get_logger
 from metric import metrics
 from monitor import monitor
 from state import set_references
 
 
-PAPER_REFERENCES_URL = (
-    "https://api.semanticscholar.org/graph/v1/paper/"
-    "ARXIV:{arxiv_id}/references"
-)
-PAPER_BATCH_URL = "https://api.semanticscholar.org/graph/v1/paper/batch"
-REFERENCE_FIELDS = (
-    "references.paperId,references.externalIds,references.title,"
-    "references.authors,references.year,references.venue,"
-    "references.publicationDate,referenceCount"
-)
 logger = get_logger(__name__)
 
+BATCH_URL = "https://api.semanticscholar.org/graph/v1/paper/batch"
 
-class SemanticScholarReferenceWorker:
-    def __init__(self):
-        self._request_lock = threading.Lock()
-        self._last_request_started = None
+# The API accepts up to 500 ids per call but returns at most ~10 MB, and
+# reference lists are large, so stay well below that. A batch that is
+# rejected or times out is split in half automatically (see _resolve).
+S2_BATCH_SIZE = 50
+# Send a partly filled batch if no new paper arrives for this long.
+S2_BATCH_WAIT = 10.0
+BATCH_TIMEOUT = max(S2_TIMEOUT, 60)
 
-    def _wait_for_request_slot(self):
-        now = time.monotonic()
-        if self._last_request_started is not None:
-            delay = SEMANTIC_SCHOLAR_REQUEST_INTERVAL - (
-                now - self._last_request_started
+# Flat field names only: nested forms such as "authors.name" are rejected.
+# "paperId" of every reference is always returned by the API.
+FIELDS = ",".join([
+    "venue",
+    "references.title",
+    "references.authors",
+    "references.year",
+    "references.publicationDate",
+    "references.venue",
+    "references.externalIds",
+])
+
+# A list this long may have been cut off by the API.
+POSSIBLY_TRUNCATED_AT = 1000
+GENERIC_VENUES = {"", "arxiv", "arxiv.org"}
+
+
+class S2RateLimiter:
+    """Space request starts at least `interval` seconds apart."""
+
+    def __init__(self, interval):
+        self.interval = interval
+        self._lock = threading.Lock()
+        self._next_allowed = 0.0
+
+    def wait(self):
+        with self._lock:
+            now = time.monotonic()
+            start = max(now, self._next_allowed)
+            self._next_allowed = start + self.interval
+
+        delay = start - now
+        if delay > 0:
+            time.sleep(delay)
+
+    def penalize(self, seconds):
+        """Push the next request back (after a 429 or a server error)."""
+        with self._lock:
+            self._next_allowed = max(
+                self._next_allowed, time.monotonic() + seconds
             )
-            if delay > 0:
-                time.sleep(delay)
 
-    def _request_headers(self):
-        if SEMANTIC_SCHOLAR_API_KEY:
-            return {"x-api-key": SEMANTIC_SCHOLAR_API_KEY}
-        return {}
 
-    def _retry_delay(self, response, retry_number):
-        retry_after = response.headers.get("Retry-After")
-        if retry_after:
-            try:
-                return max(0.0, float(retry_after))
-            except ValueError:
-                try:
-                    retry_at = parsedate_to_datetime(retry_after)
-                    if retry_at.tzinfo is None:
-                        retry_at = retry_at.replace(tzinfo=timezone.utc)
-                    return max(
-                        0.0,
-                        (retry_at - datetime.now(timezone.utc)).total_seconds(),
-                    )
-                except (TypeError, ValueError, OverflowError):
-                    pass
+s2_limiter = S2RateLimiter(S2_MIN_INTERVAL)
 
-        return SEMANTIC_SCHOLAR_RETRY_BACKOFF * (2 ** (retry_number - 1))
 
-    def _request(self, method, url, session, **kwargs):
-        with self._request_lock:
-            for attempt in range(SEMANTIC_SCHOLAR_MAX_RETRIES + 1):
-                self._wait_for_request_slot()
-                response = getattr(session, method)(
-                    url,
-                    **kwargs,
+class SplitBatch(Exception):
+    """The batch as a whole failed in a way that smaller batches may avoid."""
+
+
+def _retry_after_seconds(response, attempt):
+    try:
+        value = float(response.headers.get("Retry-After", ""))
+    except (TypeError, ValueError):
+        value = 0.0
+
+    if value <= 0:
+        value = min(60.0, 5.0 * 2 ** (attempt - 1))
+
+    return min(value, 120.0)
+
+
+def post_batch(session, arxiv_ids):
+    """POST one batch; return the list of results aligned with arxiv_ids.
+
+    Entries are null for papers Semantic Scholar does not know. Raises
+    SplitBatch when halving the batch could help, any other exception when
+    it could not (bad key, rate limit that never cleared, ...).
+    """
+    headers = {"User-Agent": USER_AGENT}
+
+    if S2_API_KEY:
+        headers["x-api-key"] = S2_API_KEY
+
+    body = {"ids": [f"ARXIV:{arxiv_id}" for arxiv_id in arxiv_ids]}
+    can_split = len(arxiv_ids) > 1
+    last_error = None
+
+    for attempt in range(1, S2_MAX_ATTEMPTS + 1):
+        s2_limiter.wait()
+
+        try:
+            with metrics.measure("s2_request"):
+                response = session.post(
+                    BATCH_URL,
+                    params={"fields": FIELDS},   # query string, not the body
+                    json=body,
+                    headers=headers,
+                    timeout=BATCH_TIMEOUT,
                 )
-                self._last_request_started = time.monotonic()
+        except requests.exceptions.Timeout as exc:
+            last_error = exc
+            if can_split:
+                raise SplitBatch(str(exc)) from exc
+            s2_limiter.penalize(attempt * 2)
+            continue
+        except requests.exceptions.RequestException as exc:
+            last_error = exc
+            s2_limiter.penalize(attempt * 2)
+            continue
 
-                if response.status_code != 429:
-                    response.raise_for_status()
-                    return response
+        status = response.status_code
 
-                if attempt == SEMANTIC_SCHOLAR_MAX_RETRIES:
-                    response.raise_for_status()
+        if status == 429:
+            metrics.inc("s2_rate_limited")
+            last_error = requests.exceptions.HTTPError(
+                "HTTP 429", response=response
+            )
+            s2_limiter.penalize(_retry_after_seconds(response, attempt))
+            continue
 
-                delay = self._retry_delay(response, attempt + 1)
-                logger.warning(
-                    "Semantic Scholar rate limited request; retry %s/%s "
-                    "in %.1f seconds",
-                    attempt + 1,
-                    SEMANTIC_SCHOLAR_MAX_RETRIES,
-                    delay,
-                )
-                time.sleep(delay)
+        if status >= 500:
+            last_error = requests.exceptions.HTTPError(
+                f"HTTP {status}", response=response
+            )
+            s2_limiter.penalize(attempt * 2)
+            continue
 
-    def fetch_references_batch(self, arxiv_ids, session):
-        response = self._request(
-            "post",
-            PAPER_BATCH_URL,
-            session,
-            params={"fields": REFERENCE_FIELDS},
-            json={
-                "ids": [f"ARXIV:{arxiv_id}" for arxiv_id in arxiv_ids]
-            },
-            timeout=SEMANTIC_SCHOLAR_API_TIMEOUT,
-            headers=self._request_headers(),
+        if status in (400, 413):
+            error = requests.exceptions.HTTPError(
+                f"HTTP {status}", response=response
+            )
+            if can_split:
+                raise SplitBatch(f"HTTP {status}") from error
+            raise error
+
+        # 401/403 (bad key), 404 and other 4xx: smaller batches won't help.
+        response.raise_for_status()
+
+        try:
+            data = response.json()
+        except ValueError as exc:
+            last_error = exc
+            s2_limiter.penalize(attempt * 2)
+            continue
+
+        if not isinstance(data, list) or len(data) != len(arxiv_ids):
+            error = RuntimeError("Unexpected batch response shape")
+            if can_split:
+                raise SplitBatch(str(error)) from error
+            raise error
+
+        return data
+
+    error = RuntimeError(
+        f"Semantic Scholar request failed after {S2_MAX_ATTEMPTS} "
+        f"attempts: {format_error(last_error)}"
+    )
+    status = getattr(getattr(last_error, "response", None), "status_code", None)
+
+    # Still rate limited: splitting would only send even more requests.
+    if can_split and status != 429:
+        raise SplitBatch(str(error)) from last_error
+
+    raise error from last_error
+
+
+def normalize_reference(item):
+    """Flatten one reference to the fields the `references` table needs."""
+    if not isinstance(item, dict):
+        return None
+
+    cited = item.get("citedPaper") or item
+    external = cited.get("externalIds") or {}
+
+    return {
+        "s2_id": cited.get("paperId"),
+        # Kept exactly as returned, so old IDs like hep-th/9901001 survive.
+        "arxiv_id": external.get("ArXiv"),
+        "title": cited.get("title"),
+        "authors": [
+            author["name"]
+            for author in (cited.get("authors") or [])
+            if isinstance(author, dict) and author.get("name")
+        ],
+        "year": cited.get("year"),
+        "submission_date": cited.get("publicationDate"),
+        "venue": cited.get("venue") or None,
+        "external_ids": external,
+    }
+
+
+def clean_venue(value):
+    if not isinstance(value, str):
+        return None
+
+    value = " ".join(value.split())
+    return None if value.lower() in GENERIC_VENUES else value
+
+
+def _parse_item(item):
+    """Turn one batch entry into (status, references, venue, error)."""
+    if item is None:
+        return ("not_found", None, None, None)
+
+    if not isinstance(item, dict):
+        return ("failed", None, None, RuntimeError("Malformed batch entry"))
+
+    raw = item.get("references") or []
+    references = [ref for ref in map(normalize_reference, raw) if ref]
+
+    metrics.inc("s2_papers_succeeded")
+    metrics.inc("s2_references_total", len(references))
+    metrics.inc(
+        "s2_references_with_arxiv_id",
+        sum(1 for ref in references if ref["arxiv_id"]),
+    )
+
+    if len(raw) >= POSSIBLY_TRUNCATED_AT:
+        metrics.inc("s2_reference_lists_maybe_truncated")
+
+    return ("ok", references, clean_venue(item.get("venue")), None)
+
+
+def _resolve(session, arxiv_ids, results):
+    try:
+        data = post_batch(session, arxiv_ids)
+
+    except SplitBatch:
+        # Too big, too slow, or one bad id spoiling the call: halve it.
+        metrics.inc("s2_batch_splits")
+        middle = len(arxiv_ids) // 2
+        _resolve(session, arxiv_ids[:middle], results)
+        _resolve(session, arxiv_ids[middle:], results)
+        return
+
+    except Exception as exc:
+        for arxiv_id in arxiv_ids:
+            results[arxiv_id] = ("failed", None, None, exc)
+        return
+
+    metrics.inc("s2_batches")
+
+    for arxiv_id, item in zip(arxiv_ids, data):
+        results[arxiv_id] = _parse_item(item)
+
+
+def crawl_papers(session, arxiv_ids):
+    """Look up many papers. Returns {arxiv_id: (status, refs, venue, error)}.
+
+    status is "ok", "not_found" (Semantic Scholar has no record) or
+    "failed" (request problem; `error` holds the exception).
+    """
+    results = {}
+    _resolve(session, list(arxiv_ids), results)
+    return results
+
+
+def process_batch(session, tasks):
+    arxiv_ids = [task["arxiv_id"] for task in tasks]
+
+    monitor.state(
+        "s2-worker",
+        "requesting",
+        task=f"{arxiv_ids[0]} (+{len(arxiv_ids) - 1})",
+        batch_size=len(arxiv_ids),
+    )
+
+    try:
+        results = crawl_papers(session, arxiv_ids)
+    except Exception as exc:
+        results = {
+            arxiv_id: ("failed", None, None, exc) for arxiv_id in arxiv_ids
+        }
+
+    for arxiv_id in arxiv_ids:
+        status, references, venue, error = results.get(
+            arxiv_id,
+            ("failed", None, None, RuntimeError("No result returned")),
         )
-        payload = response.json()
 
-        if not isinstance(payload, list) or len(payload) != len(arxiv_ids):
-            raise ValueError(
-                "Semantic Scholar returned an invalid batch response "
-                f"for {len(arxiv_ids)} papers"
-            )
-
-        results = {}
-        incomplete_ids = []
-        for arxiv_id, paper in zip(arxiv_ids, payload):
-            if paper is None:
-                raise ValueError(
-                    f"Semantic Scholar did not find paper {arxiv_id}"
-                )
-            if not isinstance(paper, dict):
-                raise ValueError(
-                    f"Semantic Scholar returned invalid paper data for {arxiv_id}"
-                )
-
-            references = paper.get("references")
-            reference_count = paper.get("referenceCount")
-            if not isinstance(references, list):
-                if reference_count == 0:
-                    references = []
-                else:
-                    incomplete_ids.append(arxiv_id)
-                    continue
-
-            results[arxiv_id] = [
-                json.dumps(
-                    {"citedPaper": reference},
-                    ensure_ascii=False,
-                )
-                for reference in references
-                if isinstance(reference, dict)
-            ]
-            if (
-                isinstance(reference_count, int)
-                and len(references) < reference_count
-            ):
-                incomplete_ids.append(arxiv_id)
-
-        for arxiv_id in incomplete_ids:
-            results[arxiv_id] = self.fetch_references(arxiv_id, session)
-
-        return results
-
-    def _get_page(self, session, arxiv_id, offset):
-        response = self._request(
-            "get",
-            PAPER_REFERENCES_URL.format(arxiv_id=arxiv_id),
-            session,
-            params={
-                "offset": offset,
-                "limit": SEMANTIC_SCHOLAR_REFERENCE_PAGE_SIZE,
-                "fields": (
-                    "contexts,intents,isInfluential,"
-                    "citedPaper.paperId,citedPaper.externalIds,"
-                    "citedPaper.title,citedPaper.authors,"
-                    "citedPaper.year,citedPaper.venue,"
-                    "citedPaper.publicationDate"
-                ),
-            },
-            timeout=SEMANTIC_SCHOLAR_API_TIMEOUT,
-            headers=self._request_headers(),
-        )
-        payload = response.json()
-
-        if not isinstance(payload, dict):
-            raise ValueError(
-                f"Semantic Scholar returned invalid response for {arxiv_id}"
-            )
-        data = payload.get("data")
-        if not isinstance(data, list):
-            raise ValueError(
-                f"Semantic Scholar returned invalid references for {arxiv_id}"
-            )
-        return data, payload.get("next")
-
-    def fetch_references(self, arxiv_id, session):
-        references = []
-        offset = 0
-
-        while True:
-            page, next_offset = self._get_page(
-                session,
+        if status == "not_found":
+            metrics.inc("s2_papers_not_found")
+            log_failure(
                 arxiv_id,
-                offset,
+                "Semantic Scholar references",
+                "Paper not found on Semantic Scholar",
             )
-            for item in page:
-                cited_paper = item.get("citedPaper")
-                if cited_paper is None:
-                    continue
-                references.append(json.dumps(item, ensure_ascii=False))
+        elif status == "failed":
+            metrics.inc("s2_papers_failed")
+            log_failure(
+                arxiv_id,
+                "Semantic Scholar references",
+                format_error(error),
+                exception=error,
+            )
 
-            if next_offset is None:
-                break
-            if not isinstance(next_offset, int) or next_offset <= offset:
-                raise ValueError(
-                    "Semantic Scholar returned an invalid pagination offset "
-                    f"for {arxiv_id}: {next_offset!r}"
-                )
-            offset = next_offset
+        # Always report back, even on failure: state.py will not write a
+        # paper's record until its reference crawl has finished.
+        set_references(arxiv_id, references, venue)
 
-        return references
+    monitor.completed("s2_batches")
 
 
-def semantic_scholar_reference_worker(task_queue):
-    logger.info("Semantic Scholar reference worker started")
-    client = SemanticScholarReferenceWorker()
+def references_worker(task_queue):
+    """Collect one task per paper, crawl them in batches."""
     session = requests.Session()
+    pending = []
+    logger.info("Semantic Scholar worker started")
 
     try:
         while True:
-            first_task = task_queue.get()
-            if first_task is STOP:
-                task_queue.task_done()
-                return
+            monitor.state(
+                "s2-worker",
+                "waiting_for_task",
+                pending_batch_size=len(pending),
+            )
 
-            tasks = [first_task]
-            stop_after_batch = False
             try:
-                while len(tasks) < BATCH_SIZE:
-                    try:
-                        task = task_queue.get(
-                            timeout=SEMANTIC_SCHOLAR_BATCH_WAIT
-                        )
-                    except Empty:
-                        break
-                    if task is STOP:
-                        task_queue.task_done()
-                        stop_after_batch = True
-                        break
-                    tasks.append(task)
+                task = task_queue.get(
+                    timeout=S2_BATCH_WAIT if pending else None
+                )
+            except queue.Empty:
+                # Quiet for a while: don't hold finished papers back.
+                process_batch(session, pending)
+                pending = []
+                continue
 
-                arxiv_ids = [task["arxiv_id"] for task in tasks]
-                for arxiv_id in arxiv_ids:
-                    monitor.state(
-                        "semantic-scholar-worker",
-                        "fetching_references",
-                        task=arxiv_id,
-                    )
+            try:
+                if task is not STOP:
+                    pending.append(task)
 
-                try:
-                    references_by_id = client.fetch_references_batch(
-                        arxiv_ids,
-                        session,
-                    )
-                except (requests.RequestException, ValueError) as exc:
-                    for arxiv_id in arxiv_ids:
-                        _mark_reference_failure(arxiv_id, exc)
-                else:
-                    for arxiv_id in arxiv_ids:
-                        references = references_by_id[arxiv_id]
-                        set_references(arxiv_id, references, "success")
-                        metrics.inc("semantic_scholar_references_fetched")
-                        metrics.inc(
-                            "semantic_scholar_reference_records",
-                            len(references),
-                        )
-                        logger.info(
-                            "Fetched %s Semantic Scholar references for %s",
-                            len(references),
-                            arxiv_id,
-                        )
+                if pending and (task is STOP or len(pending) >= S2_BATCH_SIZE):
+                    process_batch(session, pending)
+                    pending = []
+
+                if task is STOP:
+                    monitor.state("s2-worker", "stopped")
+                    return
+
             finally:
-                for task in tasks:
-                    task_queue.task_done()
-                    monitor.state(
-                        "semantic-scholar-worker",
-                        "waiting_for_paper",
-                    )
-                    monitor.completed("semantic_scholar_papers")
+                task_queue.task_done()
 
-            if stop_after_batch:
-                return
     finally:
         session.close()
-        logger.info("Semantic Scholar reference worker stopped")
-
-
-def _mark_reference_failure(arxiv_id, exc):
-    log_failure(
-        arxiv_id,
-        "Semantic Scholar references",
-        str(exc),
-        exception=(
-            exc if isinstance(exc, requests.RequestException) else None
-        ),
-        details={"error_type": type(exc).__name__},
-    )
-    metrics.inc("semantic_scholar_reference_failures")
-    set_references(arxiv_id, [], "failed")
-    logger.warning(
-        "Semantic Scholar reference lookup failed for %s: %s",
-        arxiv_id,
-        exc,
-    )
+        logger.info("Semantic Scholar worker stopped")

@@ -1,7 +1,8 @@
-
 import json
 import threading
 from queue import Queue
+from dotenv import load_dotenv
+
 
 from config import (
     NUM_DOWNLOADERS, NUM_EXTRACTORS, QUEUE_SIZE,
@@ -18,9 +19,10 @@ from metadata import metadata_worker
 from metric import metrics
 from logger import get_logger, setup_logging
 from monitor import monitor
-from semantic_scholar import semantic_scholar_reference_worker
+from semantic_scholar import references_worker
 
 
+load_dotenv()
 logger = get_logger(__name__)
 health_logger = get_logger("pipeline.health")
 HEALTH_REPORT_INTERVAL = 5
@@ -83,6 +85,7 @@ def main():
     download_dispatch_queue = Queue(maxsize=DOWNLOAD_QUEUE_SIZE)
     download_queue = Queue(maxsize=DOWNLOAD_QUEUE_SIZE)
     extraction_queue = Queue(maxsize=EXTRACTION_QUEUE_SIZE)
+    reference_queue = Queue(maxsize=QUEUE_SIZE)
 
     errors = []
     errors_lock = threading.Lock()
@@ -103,11 +106,15 @@ def main():
         scheduled_reference_ids = set()
         try:
             for task in iter_version_tasks():
-                if task["arxiv_id"] not in scheduled_reference_ids:
-                    references_queue.put({
-                        "arxiv_id": task["arxiv_id"],
-                    })
-                    scheduled_reference_ids.add(task["arxiv_id"])
+                # Semantic Scholar is queried once per paper, not per
+                # version; every paper has a v1, so use it as the trigger.
+                if task["version"] == "v1":
+                    monitor.state(
+                        "discovery",
+                        "waiting_to_enqueue_references",
+                        task=task["version_id"],
+                    )
+                    reference_queue.put({"arxiv_id": task["arxiv_id"]})
 
                 monitor.state(
                     "discovery",
@@ -130,7 +137,7 @@ def main():
             # Metadata can finish independently of source extraction.
             monitor.state("discovery", "waiting_to_enqueue_metadata_stop")
             metadata_queue.put(STOP)
-            references_queue.put(STOP)
+            reference_queue.put(STOP)
 
             # Stop download producers. Extraction remains active
             # until every downloader has finished.
@@ -147,6 +154,12 @@ def main():
         target=semantic_scholar_reference_worker,
         args=(references_queue,),
         name="semantic-scholar-reference-worker",
+    )
+
+    references_thread = threading.Thread(
+        target=references_worker,
+        args=(reference_queue,),
+        name="semantic-scholar-worker",
     )
 
     downloader_threads = [
@@ -202,6 +215,7 @@ def main():
                 "download_dispatch": download_dispatch_queue,
                 "download": download_queue,
                 "extraction": extraction_queue,
+                "references": reference_queue,
             },
         ),
         name="health-monitor",
@@ -239,6 +253,10 @@ def main():
     metadata_queue.join()
     metadata_thread.join()
     references_queue.join()
+    references_thread.join()
+
+    monitor.state("crawler", "waiting_for_references")
+    reference_queue.join()
     references_thread.join()
 
     if monitor.enabled:

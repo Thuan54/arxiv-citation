@@ -83,6 +83,13 @@ def fetch_metadata_batch(tasks):
               )
 
 
+          journal_ref = entry.find("arxiv:journal_ref", ARXIV_NS)
+          venue = (
+              " ".join(journal_ref.text.split())
+              if journal_ref is not None and journal_ref.text
+              else None
+          )
+
           metadata = {
               "title": text_value("title"),
               "authors": [
@@ -97,15 +104,13 @@ def fetch_metadata_batch(tasks):
                   for node in entry.findall("atom:category", ATOM_NS)
                   if node.get("term")
               ],
+              # <published> = date of version 1 (the paper's submission date).
               "submission_date": text_value("published")[:10] or None,
-              "updated_date": text_value("updated")[:10] or None,
-              "venue": (
-                  journal_ref.text.strip()
-                  if (journal_ref := entry.find(
-                      "arxiv:journal_ref", ARXIV_NS
-                  )) is not None and journal_ref.text
-                  else None
-              ),
+              # <updated> = date of THIS version; state.py turns these into
+              # revised_dates once every version of the paper is known.
+              "version_date": text_value("updated")[:10] or None,
+              "revised_dates": [],
+              "venue": venue,
           }
 
           set_metadata(arxiv_id, version, metadata, "success")

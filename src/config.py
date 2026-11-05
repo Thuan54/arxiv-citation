@@ -51,3 +51,18 @@ IMAGE_EXTENSIONS = {
     ".bmp",
     ".ps",
 }
+
+
+# --- Semantic Scholar (reference metadata) ---------------------------------
+# Optional free API key: export S2_API_KEY=... before running the crawler.
+S2_API_KEY = os.environ.get("S2_API_KEY") or None
+S2_TIMEOUT = 30
+S2_MAX_ATTEMPTS = 5
+
+# Spec limits: 1 request/s with a key; without one the shared pool is
+# throttled (100 requests per 5 minutes ~ one request every 3 s).
+S2_MIN_INTERVAL = 1.0 if S2_API_KEY else 3.1
+
+# papers.venue comes from arXiv's journal_ref. If that is empty, use the
+# venue Semantic Scholar reports (ignoring the generic "arXiv.org").
+VENUE_FROM_S2_FALLBACK = True
