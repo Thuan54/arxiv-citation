@@ -20,7 +20,6 @@ def initialize_paper(arxiv_id, versions):
                     "metadata": None,
                     "metadata_status": None,
                     "latex_source_path": None,
-                    "raw_references": [],
                     # Crawled from Semantic Scholar; null = crawl failed or
                     # paper not found, [] = found but no references listed.
                     "s2_references": None,
@@ -140,16 +139,6 @@ def set_source(
 
     if record is not None:
         _write_record(record)
-
-
-def set_raw_references(arxiv_id, version, references):
-    with _lock:
-        paper = _papers.get(arxiv_id)
-
-        if paper is None or version not in paper["expected"]:
-            return
-
-        paper["versions"][version]["raw_references"] = references
 
 
 def set_references(arxiv_id, references, venue=None):

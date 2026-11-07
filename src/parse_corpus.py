@@ -17,6 +17,7 @@ from config import (
     ROOT,
 )
 from hierarchy import parse_publication_sources
+from reference_extractor import extract_raw_references
 
 
 OUTPUT_FILES = {
@@ -81,11 +82,7 @@ def parse_corpus(source_file=JSONL_FILE):
                 )
                 for item in versions
             ]
-            raw_references_by_version = {
-                int(str(item.get("version", "v1")).lstrip("v")):
-                    item.get("raw_references", [])
-                for item in versions
-            }
+            references_by_version = {}
             try:
                 elements, hierarchy, parsed_versions = (
                     parse_publication_sources(arxiv_id, version_directories)
@@ -103,12 +100,77 @@ def parse_corpus(source_file=JSONL_FILE):
                 ]
                 elements, hierarchy = [], []
 
-            for parsed_version in parsed_versions:
-                parsed_version["raw_references"] = (
-                    raw_references_by_version.get(
-                        parsed_version["version"],
+            for version, directory in version_directories:
+                version_number = int(version.lstrip("v"))
+                report = {}
+                if directory is not None and directory.is_dir():
+                    try:
+                        raw_references = extract_raw_references(
+                            directory,
+                            report,
+                        )
+                    except (OSError, UnicodeError, ValueError) as exc:
+                        references_by_version[version_number] = {
+                            "raw_references": [],
+                            "reference_extraction_status": "failed",
+                            "reference_files_scanned": report.get(
+                                "total_files",
+                                0,
+                            ),
+                            "reference_extraction_errors": [
+                                f"{type(exc).__name__}: {exc}"
+                            ],
+                        }
+                    else:
+                        references_by_version[version_number] = {
+                            "raw_references": raw_references,
+                            "reference_extraction_status": (
+                                "partial"
+                                if report["read_failures"] else "complete"
+                            ),
+                            "reference_files_scanned": report["total_files"],
+                            "reference_extraction_errors": report["read_failures"],
+                        }
+                else:
+                    legacy_references = next(
+                        (
+                            item.get("raw_references", [])
+                            for item in versions
+                            if int(
+                                str(item.get("version", "v1")).lstrip("v")
+                            ) == version_number
+                        ),
                         [],
                     )
+                    references_by_version[version_number] = {
+                        "raw_references": legacy_references,
+                        "reference_extraction_status": "source_unavailable",
+                        "reference_files_scanned": 0,
+                        "reference_extraction_errors": [],
+                    }
+
+            for parsed_version in parsed_versions:
+                parsed_version.update(
+                    references_by_version.get(
+                        parsed_version["version"],
+                        {
+                            "raw_references": [],
+                            "reference_extraction_status": "failed",
+                            "reference_files_scanned": 0,
+                            "reference_extraction_errors": [],
+                        },
+                    )
+                )
+                source_version = next(
+                    (
+                        item for item in versions
+                        if int(str(item.get("version", "v1")).lstrip("v"))
+                        == parsed_version["version"]
+                    ),
+                    {},
+                )
+                parsed_version["s2_references"] = source_version.get(
+                    "s2_references"
                 )
 
             publication_rows = {
