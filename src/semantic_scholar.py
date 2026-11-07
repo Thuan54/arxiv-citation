@@ -54,34 +54,6 @@ POSSIBLY_TRUNCATED_AT = 1000
 GENERIC_VENUES = {"", "arxiv", "arxiv.org"}
 
 
-class S2RateLimiter:
-    """Space request starts at least `interval` seconds apart."""
-
-    def __init__(self, interval):
-        self.interval = interval
-        self._lock = threading.Lock()
-        self._next_allowed = 0.0
-
-    def wait(self):
-        with self._lock:
-            now = time.monotonic()
-            start = max(now, self._next_allowed)
-            self._next_allowed = start + self.interval
-
-        delay = start - now
-        if delay > 0:
-            time.sleep(delay)
-
-    def penalize(self, seconds):
-        """Push the next request back (after a 429 or a server error)."""
-        with self._lock:
-            self._next_allowed = max(
-                self._next_allowed, time.monotonic() + seconds
-            )
-
-
-s2_limiter = S2RateLimiter(S2_MIN_INTERVAL)
-
 
 class SplitBatch(Exception):
     """The batch as a whole failed in a way that smaller batches may avoid."""

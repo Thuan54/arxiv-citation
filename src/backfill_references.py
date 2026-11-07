@@ -15,7 +15,7 @@ import shutil
 from collections import Counter
 
 from config import JSONL_FILE, ROOT
-from extractor import extract_raw_references
+from reference_extractor import extract_raw_references
 
 
 def main():
