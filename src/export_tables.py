@@ -11,18 +11,14 @@ from config import (
     JSONL_FILE,
     PAPERS_TABLE_FILE,
     REFERENCES_TABLE_FILE,
-    SEMANTIC_SCHOLAR_API_KEY,
-    SEMANTIC_SCHOLAR_API_TIMEOUT,
     USER_AGENT,
 )
 from helper import clean_arxiv_id, log_failure, parse_versioned_id
 from rate_limiter import arxiv_limiter
+from semantic_scholar import S2_BATCH_SIZE, SplitBatch, post_batch
 
 
 ARXIV_API_URL = "https://export.arxiv.org/api/query"
-SEMANTIC_SCHOLAR_BATCH_URL = (
-    "https://api.semanticscholar.org/graph/v1/paper/batch"
-)
 ATOM_NS = {"atom": "http://www.w3.org/2005/Atom"}
 ARXIV_ID_PATTERNS = (
     re.compile(
@@ -203,44 +199,43 @@ def _fetch_arxiv_metadata(arxiv_ids):
 
 def _fetch_semantic_scholar_ids(arxiv_ids):
     semantic_ids = {}
-    headers = {}
-    if SEMANTIC_SCHOLAR_API_KEY:
-        headers["x-api-key"] = SEMANTIC_SCHOLAR_API_KEY
 
-    for start in range(0, len(arxiv_ids), 500):
-        batch = arxiv_ids[start:start + 500]
+    def fetch_batch(session, batch):
         try:
-            response = requests.post(
-                SEMANTIC_SCHOLAR_BATCH_URL,
-                params={
-                    "fields": "paperId,externalIds",
-                },
-                json={
-                    "ids": [f"ARXIV:{arxiv_id}" for arxiv_id in batch],
-                },
-                headers=headers,
-                timeout=SEMANTIC_SCHOLAR_API_TIMEOUT,
+            results = post_batch(
+                session,
+                batch,
+                fields="paperId,externalIds",
             )
-            response.raise_for_status()
-            results = response.json()
-            if not isinstance(results, list) or len(results) != len(batch):
-                raise ValueError(
-                    "Semantic Scholar returned an unexpected batch response"
-                )
-
-            for arxiv_id, result in zip(batch, results):
-                if result and result.get("paperId"):
-                    semantic_ids[arxiv_id] = result["paperId"]
-        except (requests.RequestException, ValueError) as exc:
+        except SplitBatch:
+            middle = len(batch) // 2
+            fetch_batch(session, batch[:middle])
+            fetch_batch(session, batch[middle:])
+            return
+        except Exception as exc:
             for arxiv_id in batch:
                 log_failure(
                     arxiv_id,
                     "Semantic Scholar reference lookup",
                     exc,
-                    exception=exc if isinstance(
-                        exc, requests.RequestException
-                    ) else None,
+                    exception=exc,
                 )
+            return
+
+        for arxiv_id, result in zip(batch, results):
+            if result and result.get("paperId"):
+                semantic_ids[arxiv_id] = result["paperId"]
+
+    session = requests.Session()
+    try:
+        for start in range(0, len(arxiv_ids), S2_BATCH_SIZE):
+            fetch_batch(
+                session,
+                arxiv_ids[start:start + S2_BATCH_SIZE],
+            )
+    finally:
+        session.close()
+
     return semantic_ids
 
 

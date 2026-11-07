@@ -16,12 +16,6 @@ PROCESSED_DIR = ROOT / "data/processed"
 ELEMENTS_FILE = PROCESSED_DIR / "elements.jsonl"
 HIERARCHY_FILE = PROCESSED_DIR / "hierarchy.jsonl"
 PARSED_VERSIONS_FILE = PROCESSED_DIR / "versions.jsonl"
-SEMANTIC_SCHOLAR_API_KEY = os.getenv("SEMANTIC_SCHOLAR_API_KEY")
-SEMANTIC_SCHOLAR_REQUEST_INTERVAL = 1.0
-SEMANTIC_SCHOLAR_MAX_RETRIES = 5
-SEMANTIC_SCHOLAR_RETRY_BACKOFF = 2.0
-SEMANTIC_SCHOLAR_BATCH_WAIT = 0.1
-SEMANTIC_SCHOLAR_REFERENCE_PAGE_SIZE = 1000
 
 BATCH_SIZE = 50
 
@@ -41,7 +35,6 @@ SOURCE_BURST_PAUSE = 1.0
 API_TIMEOUT = 10
 DOWNLOAD_TIMEOUT = 15
 USER_AGENT = "HCMUS-IntroDS-Crawler/1.0 (academic project)"
-SEMANTIC_SCHOLAR_API_TIMEOUT = 30
 
 QUEUE_SIZE = BATCH_SIZE * 4
 
@@ -58,7 +51,7 @@ IMAGE_EXTENSIONS = {
 
 
 # --- Semantic Scholar (reference metadata) ---------------------------------
-# Optional free API key: export S2_API_KEY=... before running the crawler.
+# Optional free API key: export S2_API_KEY=... before post-crawl enrichment.
 S2_API_KEY = os.environ.get("S2_API_KEY") or None
 S2_TIMEOUT = 30
 S2_MAX_ATTEMPTS = 5
