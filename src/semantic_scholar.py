@@ -1,40 +1,24 @@
-"""Crawl reference metadata from the Semantic Scholar Graph API.
+"""Fetch Semantic Scholar data during the separate post-crawl stage.
 
 Papers are resolved in batches through POST /graph/v1/paper/batch (up to 500
-ids per request) instead of one GET per paper, so a crawl needs a small
-fraction of the requests and stays inside the rate limits.
-
-Semantic Scholar keeps a single reference list per arXiv paper and does not
-distinguish versions, so one lookup per paper is attached to every version
-when the record is written.
+ids per request) instead of one GET per paper. Oversized responses are split
+automatically, and transient errors are retried.
 """
-import queue
-import threading
-import time
-
 import requests
 
 from config import (
-    S2_API_KEY, S2_MAX_ATTEMPTS, S2_MIN_INTERVAL, S2_TIMEOUT, USER_AGENT,
+    S2_API_KEY, S2_MAX_ATTEMPTS, S2_TIMEOUT, USER_AGENT,
 )
-from downloader import STOP
-from helper import format_error, log_failure
-from logger import get_logger
+from helper import format_error
 from metric import metrics
-from monitor import monitor
-from state import set_references
+from rate_limiter import s2_limiter
 
-
-logger = get_logger(__name__)
 
 BATCH_URL = "https://api.semanticscholar.org/graph/v1/paper/batch"
 
-# The API accepts up to 500 ids per call but returns at most ~10 MB, and
-# reference lists are large, so stay well below that. A batch that is
-# rejected or times out is split in half automatically (see _resolve).
-S2_BATCH_SIZE = 50
-# Send a partly filled batch if no new paper arrives for this long.
-S2_BATCH_WAIT = 10.0
+# The API accepts up to 500 ids. Oversized or rejected responses are split
+# into smaller requests automatically (see _resolve).
+S2_BATCH_SIZE = 500
 BATCH_TIMEOUT = max(S2_TIMEOUT, 60)
 
 # Flat field names only: nested forms such as "authors.name" are rejected.
@@ -53,8 +37,6 @@ FIELDS = ",".join([
 POSSIBLY_TRUNCATED_AT = 1000
 GENERIC_VENUES = {"", "arxiv", "arxiv.org"}
 
-
-
 class SplitBatch(Exception):
     """The batch as a whole failed in a way that smaller batches may avoid."""
 
@@ -71,7 +53,7 @@ def _retry_after_seconds(response, attempt):
     return min(value, 120.0)
 
 
-def post_batch(session, arxiv_ids):
+def post_batch(session, arxiv_ids, fields=FIELDS):
     """POST one batch; return the list of results aligned with arxiv_ids.
 
     Entries are null for papers Semantic Scholar does not know. Raises
@@ -94,7 +76,7 @@ def post_batch(session, arxiv_ids):
             with metrics.measure("s2_request"):
                 response = session.post(
                     BATCH_URL,
-                    params={"fields": FIELDS},   # query string, not the body
+                    params={"fields": fields},
                     json=body,
                     headers=headers,
                     timeout=BATCH_TIMEOUT,
@@ -255,93 +237,3 @@ def crawl_papers(session, arxiv_ids):
     results = {}
     _resolve(session, list(arxiv_ids), results)
     return results
-
-
-def process_batch(session, tasks):
-    arxiv_ids = [task["arxiv_id"] for task in tasks]
-
-    monitor.state(
-        "s2-worker",
-        "requesting",
-        task=f"{arxiv_ids[0]} (+{len(arxiv_ids) - 1})",
-        batch_size=len(arxiv_ids),
-    )
-
-    try:
-        results = crawl_papers(session, arxiv_ids)
-    except Exception as exc:
-        results = {
-            arxiv_id: ("failed", None, None, exc) for arxiv_id in arxiv_ids
-        }
-
-    for arxiv_id in arxiv_ids:
-        status, references, venue, error = results.get(
-            arxiv_id,
-            ("failed", None, None, RuntimeError("No result returned")),
-        )
-
-        if status == "not_found":
-            metrics.inc("s2_papers_not_found")
-            log_failure(
-                arxiv_id,
-                "Semantic Scholar references",
-                "Paper not found on Semantic Scholar",
-            )
-        elif status == "failed":
-            metrics.inc("s2_papers_failed")
-            log_failure(
-                arxiv_id,
-                "Semantic Scholar references",
-                format_error(error),
-                exception=error,
-            )
-
-        # Always report back, even on failure: state.py will not write a
-        # paper's record until its reference crawl has finished.
-        set_references(arxiv_id, references, venue)
-
-    monitor.completed("s2_batches")
-
-
-def references_worker(task_queue):
-    """Collect one task per paper, crawl them in batches."""
-    session = requests.Session()
-    pending = []
-    logger.info("Semantic Scholar worker started")
-
-    try:
-        while True:
-            monitor.state(
-                "s2-worker",
-                "waiting_for_task",
-                pending_batch_size=len(pending),
-            )
-
-            try:
-                task = task_queue.get(
-                    timeout=S2_BATCH_WAIT if pending else None
-                )
-            except queue.Empty:
-                # Quiet for a while: don't hold finished papers back.
-                process_batch(session, pending)
-                pending = []
-                continue
-
-            try:
-                if task is not STOP:
-                    pending.append(task)
-
-                if pending and (task is STOP or len(pending) >= S2_BATCH_SIZE):
-                    process_batch(session, pending)
-                    pending = []
-
-                if task is STOP:
-                    monitor.state("s2-worker", "stopped")
-                    return
-
-            finally:
-                task_queue.task_done()
-
-    finally:
-        session.close()
-        logger.info("Semantic Scholar worker stopped")

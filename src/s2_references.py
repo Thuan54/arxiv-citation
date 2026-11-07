@@ -1,15 +1,16 @@
-"""Re-crawl Semantic Scholar references for papers where they are missing.
+"""Enrich completed crawl output with Semantic Scholar data.
 
-Fixes an existing papers.jsonl without re-running the whole crawler: only
-papers whose `s2_references` is null (crawl failed or paper not found) are
-looked up again, in batches. Run from the project root:
+Run after the crawler has finished. Papers with null `s2_references` are
+looked up in batches of up to 500. Failed lookups remain null, so rerunning
+this script retries them without repeating the crawler:
 
     export S2_API_KEY=...
-    python retry_s2_references.py --dry-run          # report only
-    python retry_s2_references.py                    # update papers.jsonl
-    python retry_s2_references.py --include-empty    # also retry [] results
+    python src/retry_s2_references.py --dry-run
+    python src/retry_s2_references.py
+    python src/retry_s2_references.py --include-empty
 
-The original file is kept as papers.jsonl.bak.
+After enrichment, normalized tables are exported. The original paper file is
+kept as papers.jsonl.bak.
 """
 import argparse
 import json
@@ -19,7 +20,8 @@ from collections import Counter
 import requests
 
 from config import JSONL_FILE, S2_API_KEY, VENUE_FROM_S2_FALLBACK
-from helper import format_error
+from export_tables import export_tables
+from helper import format_error, log_failure
 from semantic_scholar import S2_BATCH_SIZE, crawl_papers
 
 
@@ -79,10 +81,21 @@ def main():
         status, references, venue, error = result
 
         if status == "not_found":
+            log_failure(
+                record["arxiv_id"],
+                "Semantic Scholar references",
+                "Paper not found on Semantic Scholar",
+            )
             outcome["still not found on Semantic Scholar"] += 1
             continue
 
         if status == "failed":
+            log_failure(
+                record["arxiv_id"],
+                "Semantic Scholar references",
+                format_error(error),
+                exception=error,
+            )
             outcome[f"still failing: {format_error(error)}"] += 1
             continue
 
@@ -119,6 +132,7 @@ def main():
     shutil.copy2(JSONL_FILE, bak_file)
     tmp_file.replace(JSONL_FILE)
     print(f"Wrote {JSONL_FILE} (backup: {bak_file.name})")
+    print(f"Exported tables: {export_tables()}")
 
 
 if __name__ == "__main__":

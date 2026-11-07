@@ -1,7 +1,7 @@
 import json
 import threading
 
-from config import JSONL_FILE, VENUE_FROM_S2_FALLBACK
+from config import JSONL_FILE
 from logger import get_logger
 
 _lock = threading.Lock()
@@ -20,17 +20,13 @@ def initialize_paper(arxiv_id, versions):
                     "metadata": None,
                     "metadata_status": None,
                     "latex_source_path": None,
-                    # Crawled from Semantic Scholar; null = crawl failed or
-                    # paper not found, [] = found but no references listed.
+                    # Filled by the post-crawl Semantic Scholar enrichment.
                     "s2_references": None,
                 }
                 for version in versions
             },
             "metadata_done": set(),
             "source_done": set(),
-            "references_done": False,
-            "s2_references": None,
-            "s2_venue": None,
         }
 
 
@@ -42,11 +38,7 @@ def _finish_if_ready(arxiv_id):
 
     expected = paper["expected"]
 
-    if (
-        paper["metadata_done"] != expected
-        or paper["source_done"] != expected
-        or not paper["references_done"]
-    ):
+    if paper["metadata_done"] != expected or paper["source_done"] != expected:
         return None
 
     ordered = sorted(expected, key=lambda v: int(v[1:]))
@@ -57,7 +49,6 @@ def _finish_if_ready(arxiv_id):
 
     for version in ordered:
         item = paper["versions"][version]
-        item["s2_references"] = paper["s2_references"]
         metadata = item["metadata"]
 
         if metadata is None:
@@ -67,13 +58,6 @@ def _finish_if_ready(arxiv_id):
             revised_dates.append(metadata["version_date"])
 
         metadata["revised_dates"] = list(revised_dates)
-
-        if (
-            VENUE_FROM_S2_FALLBACK
-            and not metadata.get("venue")
-            and paper["s2_venue"]
-        ):
-            metadata["venue"] = paper["s2_venue"]
 
     record = {
         "arxiv_id": arxiv_id,
@@ -134,24 +118,6 @@ def set_source(
         item["latex_source_path"] = path
         item["source_status"] = status
         paper["source_done"].add(version)
-
-        record = _finish_if_ready(arxiv_id)
-
-    if record is not None:
-        _write_record(record)
-
-
-def set_references(arxiv_id, references, venue=None):
-    """Record the Semantic Scholar result (references=None on failure)."""
-    with _lock:
-        paper = _papers.get(arxiv_id)
-
-        if paper is None:
-            return
-
-        paper["s2_references"] = references
-        paper["s2_venue"] = venue
-        paper["references_done"] = True
 
         record = _finish_if_ready(arxiv_id)
 

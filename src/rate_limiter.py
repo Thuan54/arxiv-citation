@@ -5,6 +5,7 @@ from contextlib import contextmanager
 
 from config import (
     API_INTERVAL,
+    S2_MIN_INTERVAL,
     SOURCE_BURST_SIZE,
     SOURCE_BURST_PAUSE,
 )
