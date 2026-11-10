@@ -18,6 +18,7 @@ from config import (
 )
 from hierarchy import parse_publication_sources
 from reference_extractor import extract_raw_references
+from s2_reference_data import load_s2_references
 
 
 OUTPUT_FILES = {
@@ -53,6 +54,7 @@ def parse_corpus(source_file=JSONL_FILE):
     temporary_files = {}
     output_streams = {}
     counts = {name: 0 for name in OUTPUT_FILES}
+    s2_references = load_s2_references()
     try:
         for name, output_path in OUTPUT_FILES.items():
             output_path.parent.mkdir(parents=True, exist_ok=True)
@@ -169,8 +171,11 @@ def parse_corpus(source_file=JSONL_FILE):
                     ),
                     {},
                 )
-                parsed_version["s2_references"] = source_version.get(
-                    "s2_references"
+                enrichment = s2_references.get(arxiv_id)
+                parsed_version["s2_references"] = (
+                    enrichment["s2_references"]
+                    if enrichment is not None
+                    else source_version.get("s2_references")
                 )
 
             publication_rows = {

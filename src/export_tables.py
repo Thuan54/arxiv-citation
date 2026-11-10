@@ -11,11 +11,13 @@ from config import (
     JSONL_FILE,
     PAPERS_TABLE_FILE,
     REFERENCES_TABLE_FILE,
+    VENUE_FROM_S2_FALLBACK,
     USER_AGENT,
 )
 from helper import clean_arxiv_id, log_failure, parse_versioned_id
 from rate_limiter import arxiv_limiter
 from semantic_scholar import S2_BATCH_SIZE, SplitBatch, post_batch
+from s2_reference_data import load_s2_references
 
 
 ARXIV_API_URL = "https://export.arxiv.org/api/query"
@@ -54,17 +56,26 @@ def _version_number(version):
     return int(match.group(1)) if match else 0
 
 
-def build_papers_table(records):
+def build_papers_table(records, s2_references=None):
+    s2_references = s2_references or {}
     rows = []
     for record in records:
         versions = sorted(
             record.get("versions", []),
             key=lambda item: _version_number(item.get("version", "")),
         )
-        metadata_by_version = [
-            item.get("metadata") or {}
-            for item in versions
-        ]
+        enrichment = s2_references.get(record["arxiv_id"])
+        metadata_by_version = []
+        for item in versions:
+            metadata = dict(item.get("metadata") or {})
+            if (
+                enrichment is not None
+                and VENUE_FROM_S2_FALLBACK
+                and not metadata.get("venue")
+                and enrichment.get("venue")
+            ):
+                metadata["venue"] = enrichment["venue"]
+            metadata_by_version.append(metadata)
 
         initial_metadata = next(
             (
@@ -299,7 +310,7 @@ def _write_jsonl_atomic(path, rows):
 def export_tables(source_path=JSONL_FILE):
     """Write the normalized paper and arXiv-reference JSONL tables."""
     records = _read_paper_records(Path(source_path))
-    papers_table = build_papers_table(records)
+    papers_table = build_papers_table(records, load_s2_references())
     references_table = build_references_table(records, papers_table)
     _write_jsonl_atomic(PAPERS_TABLE_FILE, papers_table)
     _write_jsonl_atomic(REFERENCES_TABLE_FILE, references_table)
