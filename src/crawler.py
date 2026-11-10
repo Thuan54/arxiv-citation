@@ -26,44 +26,6 @@ health_logger = get_logger("pipeline.health")
 HEALTH_REPORT_INTERVAL = 5
 
 
-def forward_download_tasks(
-    dispatch_queue,
-    download_queue,
-    worker_count,
-):
-    """Move discovered downloads to the bounded worker queue."""
-    stopped_workers = 0
-
-    while stopped_workers < worker_count:
-        monitor.state(
-            "download-dispatcher",
-            "waiting_for_download_dispatch_task",
-        )
-        task = dispatch_queue.get()
-
-        try:
-            if task is STOP:
-                monitor.state(
-                    "download-dispatcher",
-                    "waiting_to_enqueue_download_stop",
-                    stopped_workers=stopped_workers + 1,
-                )
-                download_queue.put(STOP)
-                stopped_workers += 1
-                continue
-
-            monitor.state(
-                "download-dispatcher",
-                "waiting_to_enqueue_download",
-                task=task["version_id"],
-            )
-            download_queue.put(task)
-        finally:
-            dispatch_queue.task_done()
-
-    monitor.state("download-dispatcher", "stopped")
-
-
 def health_report(stop_event, queues):
     while True:
         health_logger.info(
@@ -76,9 +38,8 @@ def health_report(stop_event, queues):
 
 
 def main():
-    setup_logging(only_logger="pipeline")
+    setup_logging(only_logger="state")
     metadata_queue = Queue(maxsize=QUEUE_SIZE)
-    download_dispatch_queue = Queue(maxsize=DOWNLOAD_QUEUE_SIZE)
     download_queue = Queue(maxsize=DOWNLOAD_QUEUE_SIZE)
     extraction_queue = Queue(maxsize=EXTRACTION_QUEUE_SIZE)
 
@@ -109,10 +70,10 @@ def main():
 
                 monitor.state(
                     "discovery",
-                    "waiting_to_enqueue_download_dispatch",
+                    "waiting_to_enqueue_download",
                     task=task["version_id"],
                 )
-                download_dispatch_queue.put(task)
+                download_queue.put(task)
 
         except Exception as exc:
             record_error(exc)
@@ -122,11 +83,10 @@ def main():
             monitor.state("discovery", "waiting_to_enqueue_metadata_stop")
             metadata_queue.put(STOP)
 
-            # Stop download producers. Extraction remains active
-            # until every downloader has finished.
+            # Extraction remains active until every downloader has finished.
             monitor.state("discovery", "waiting_to_enqueue_download_stops")
             for _ in range(NUM_DOWNLOADERS):
-                download_dispatch_queue.put(STOP)
+                download_queue.put(STOP)
 
     metadata_thread = threading.Thread(
         target=metadata_worker,
@@ -165,15 +125,6 @@ def main():
         target=produce,
         name="discovery",
     )
-    download_dispatcher = threading.Thread(
-        target=forward_download_tasks,
-        args=(
-            download_dispatch_queue,
-            download_queue,
-            NUM_DOWNLOADERS,
-        ),
-        name="download-dispatcher",
-    )
     monitor_stop = threading.Event()
     health_thread = threading.Thread(
         target=health_report,
@@ -181,7 +132,6 @@ def main():
             monitor_stop,
             {
                 "metadata": metadata_queue,
-                "download_dispatch": download_dispatch_queue,
                 "download": download_queue,
                 "extraction": extraction_queue,
             },
@@ -192,12 +142,9 @@ def main():
 
     if monitor.enabled:
         health_thread.start()
-    download_dispatcher.start()
     producer.start()
 
     producer.join()
-    download_dispatch_queue.join()
-    download_dispatcher.join()
 
     # All discovered download tasks and stop signals are queued.
     monitor.state("crawler", "waiting_for_downloads")
@@ -227,7 +174,7 @@ def main():
 
     metrics.report()
     logger.info(
-        "Crawl complete. Run `python src/retry_s2_references.py` to enrich "
+        "Crawl complete. Run `python src/s2_references.py` to enrich "
         "Semantic Scholar data and export tables."
     )
 
