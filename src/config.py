@@ -7,6 +7,7 @@ MONITOR_ENABLED = False
 
 IDS_FILE = ROOT / "data/inputs/arxiv_ids.txt"
 JSONL_FILE = ROOT / "data/metadata/papers.jsonl"
+S2_REFERENCES_FILE = ROOT / "data/metadata/s2_references.jsonl"
 PAPERS_TABLE_FILE = ROOT / "data/metadata/papers_table.jsonl"
 REFERENCES_TABLE_FILE = ROOT / "data/metadata/references_table.jsonl"
 FAILURES_FILE = ROOT / "data/metadata/failures.jsonl"

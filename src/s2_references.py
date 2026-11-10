@@ -1,31 +1,39 @@
 """Enrich completed crawl output with Semantic Scholar data.
 
-Run after the crawler has finished. Papers with null `s2_references` are
-looked up in batches of up to 500. Failed lookups remain null, so rerunning
-this script retries them without repeating the crawler:
+Run after the crawler has finished. Papers without `s2_references` are looked
+up in batches of up to 500. Results are saved in a compact sidecar file, leaving
+the crawler output unchanged. Failed lookups are retried on the next run:
 
     export S2_API_KEY=...
-    python src/retry_s2_references.py --dry-run
-    python src/retry_s2_references.py
-    python src/retry_s2_references.py --include-empty
+    python src/s2_references.py --dry-run
+    python src/s2_references.py
+    python src/s2_references.py --include-empty
 
-After enrichment, normalized tables are exported. The original paper file is
-kept as papers.jsonl.bak.
+After enrichment, normalized tables are exported.
 """
 import argparse
 import json
-import shutil
 from collections import Counter
 
 import requests
 
-from config import JSONL_FILE, S2_API_KEY, VENUE_FROM_S2_FALLBACK
+from config import (
+    JSONL_FILE,
+    S2_API_KEY,
+    S2_REFERENCES_FILE,
+    VENUE_FROM_S2_FALLBACK,
+)
 from export_tables import export_tables
 from helper import format_error, log_failure
 from semantic_scholar import S2_BATCH_SIZE, crawl_papers
+from s2_reference_data import load_s2_references
 
 
-def needs_retry(record, include_empty):
+def needs_retry(record, include_empty, enrichment):
+    if enrichment is not None:
+        refs = enrichment["s2_references"]
+        return include_empty and refs == []
+
     versions = record.get("versions", [])
     refs = versions[0].get("s2_references") if versions else None
 
@@ -49,15 +57,28 @@ def main():
     if not S2_API_KEY:
         print("Warning: S2_API_KEY is not set; expect heavy throttling.")
 
+    enrichments = load_s2_references(S2_REFERENCES_FILE)
+    total = 0
+    todo = []
     with JSONL_FILE.open("r", encoding="utf-8") as source:
-        records = [json.loads(line) for line in source if line.strip()]
-
-    todo = [
-        record["arxiv_id"]
-        for record in records
-        if needs_retry(record, args.include_empty)
-    ]
-    print(f"{len(todo)} of {len(records)} papers need a Semantic Scholar retry")
+        for line_number, line in enumerate(source, 1):
+            if not line.strip():
+                continue
+            try:
+                record = json.loads(line)
+            except json.JSONDecodeError as exc:
+                raise ValueError(
+                    f"Invalid JSON in {JSONL_FILE} at line {line_number}"
+                ) from exc
+            total += 1
+            arxiv_id = record["arxiv_id"]
+            if needs_retry(
+                record,
+                args.include_empty,
+                enrichments.get(arxiv_id),
+            ):
+                todo.append(arxiv_id)
+    print(f"{len(todo)} of {total} papers need a Semantic Scholar retry")
 
     results = {}
     session = requests.Session()
@@ -71,18 +92,12 @@ def main():
 
     recovered = 0
     outcome = Counter()
-
-    for record in records:
-        result = results.get(record["arxiv_id"])
-
-        if result is None:
-            continue
-
+    for arxiv_id, result in results.items():
         status, references, venue, error = result
 
         if status == "not_found":
             log_failure(
-                record["arxiv_id"],
+                arxiv_id,
                 "Semantic Scholar references",
                 "Paper not found on Semantic Scholar",
             )
@@ -91,7 +106,7 @@ def main():
 
         if status == "failed":
             log_failure(
-                record["arxiv_id"],
+                arxiv_id,
                 "Semantic Scholar references",
                 format_error(error),
                 exception=error,
@@ -101,18 +116,11 @@ def main():
 
         recovered += 1
         outcome["recovered" if references else "found, but no references listed"] += 1
-
-        for version in record["versions"]:
-            version["s2_references"] = references
-            metadata = version.get("metadata")
-
-            if (
-                metadata is not None
-                and VENUE_FROM_S2_FALLBACK
-                and not metadata.get("venue")
-                and venue
-            ):
-                metadata["venue"] = venue
+        enrichments[arxiv_id] = {
+            "arxiv_id": arxiv_id,
+            "s2_references": references,
+            "venue": venue if VENUE_FROM_S2_FALLBACK else None,
+        }
 
     print(f"Updated {recovered} papers")
     for reason, count in outcome.most_common():
@@ -122,16 +130,13 @@ def main():
         print("(dry run: nothing written)")
         return
 
-    tmp_file = JSONL_FILE.with_name(JSONL_FILE.name + ".tmp")
-    bak_file = JSONL_FILE.with_name(JSONL_FILE.name + ".bak")
-
+    S2_REFERENCES_FILE.parent.mkdir(parents=True, exist_ok=True)
+    tmp_file = S2_REFERENCES_FILE.with_name(S2_REFERENCES_FILE.name + ".tmp")
     with tmp_file.open("w", encoding="utf-8") as out:
-        for record in records:
-            out.write(json.dumps(record, ensure_ascii=False) + "\n")
-
-    shutil.copy2(JSONL_FILE, bak_file)
-    tmp_file.replace(JSONL_FILE)
-    print(f"Wrote {JSONL_FILE} (backup: {bak_file.name})")
+        for enrichment in enrichments.values():
+            out.write(json.dumps(enrichment, ensure_ascii=False) + "\n")
+    tmp_file.replace(S2_REFERENCES_FILE)
+    print(f"Wrote {S2_REFERENCES_FILE}")
     print(f"Exported tables: {export_tables()}")
 
 
