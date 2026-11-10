@@ -1,39 +1,14 @@
 import json
-import re
-import xml.etree.ElementTree as ET
 from pathlib import Path
 
-import requests
-
 from config import (
-    API_TIMEOUT,
-    BATCH_SIZE,
     JSONL_FILE,
     PAPERS_TABLE_FILE,
     REFERENCES_TABLE_FILE,
     VENUE_FROM_S2_FALLBACK,
-    USER_AGENT,
 )
-from helper import clean_arxiv_id, log_failure, parse_versioned_id
-from rate_limiter import arxiv_limiter
-from semantic_scholar import S2_BATCH_SIZE, SplitBatch, post_batch
+from helper import clean_arxiv_id
 from s2_reference_data import load_s2_references
-
-
-ARXIV_API_URL = "https://export.arxiv.org/api/query"
-ATOM_NS = {"atom": "http://www.w3.org/2005/Atom"}
-ARXIV_ID_PATTERNS = (
-    re.compile(
-        r"(?:arxiv\s*:\s*|arxiv\.org/(?:abs|pdf)/)"
-        r"(?P<id>\d{4}\.\d{4,5})(?:v\d+)?",
-        re.IGNORECASE,
-    ),
-    re.compile(
-        r"(?:arxiv\s*:\s*|arxiv\.org/(?:abs|pdf)/)"
-        r"(?P<id>[a-z-]+(?:\.[a-z]{2})?/\d{7})(?:v\d+)?",
-        re.IGNORECASE,
-    ),
-)
 
 
 def _read_paper_records(path):
@@ -128,171 +103,37 @@ def build_papers_table(records, s2_references=None):
     return rows
 
 
-def extract_citation_arxiv_ids(raw_reference):
-    identifiers = []
-    try:
-        semantic_reference = json.loads(raw_reference)
-    except (TypeError, json.JSONDecodeError):
-        semantic_reference = None
-
-    if isinstance(semantic_reference, dict):
-        cited_paper = semantic_reference.get("citedPaper") or {}
-        external_ids = cited_paper.get("externalIds") or {}
-        arxiv_id = external_ids.get("ArXiv") or external_ids.get("arXiv")
-        if arxiv_id:
-            identifiers.append(clean_arxiv_id(str(arxiv_id)))
-
-    for pattern in ARXIV_ID_PATTERNS:
-        for match in pattern.finditer(raw_reference):
-            arxiv_id = match.group("id")
-            if "/" in arxiv_id:
-                arxiv_id = arxiv_id.lower()
-            if arxiv_id not in identifiers:
-                identifiers.append(arxiv_id)
-    return identifiers
-
-
-def _fetch_arxiv_metadata(arxiv_ids):
-    metadata_by_id = {}
-    for start in range(0, len(arxiv_ids), BATCH_SIZE):
-        batch = arxiv_ids[start:start + BATCH_SIZE]
-        try:
-            with arxiv_limiter.request("api"):
-                response = requests.get(
-                    ARXIV_API_URL,
-                    params={
-                        "id_list": ",".join(batch),
-                        "max_results": len(batch),
-                    },
-                    headers={"User-Agent": USER_AGENT},
-                    timeout=API_TIMEOUT,
-                )
-                response.raise_for_status()
-
-            root = ET.fromstring(response.content)
-            for entry in root.findall("atom:entry", ATOM_NS):
-                entry_id = entry.findtext("atom:id", namespaces=ATOM_NS)
-                parsed_id = parse_versioned_id(entry_id or "")
-                if parsed_id is None:
-                    continue
-                arxiv_id, _ = parsed_id
-
-                def text(tag):
-                    return (
-                        entry.findtext(f"atom:{tag}", namespaces=ATOM_NS)
-                        or ""
-                    ).strip()
-
-                metadata_by_id[arxiv_id] = {
-                    "title": " ".join(text("title").split()) or None,
-                    "authors": [
-                        name
-                        for author in entry.findall("atom:author", ATOM_NS)
-                        if (
-                            name := author.findtext(
-                                "atom:name",
-                                namespaces=ATOM_NS,
-                            )
-                        )
-                    ],
-                    "submission_date": text("published")[:10] or None,
-                }
-        except (requests.RequestException, ET.ParseError, ValueError) as exc:
-            for arxiv_id in batch:
-                log_failure(
-                    arxiv_id,
-                    "Reference arXiv metadata",
-                    exc,
-                    exception=exc,
-                )
-    return metadata_by_id
-
-
-def _fetch_semantic_scholar_ids(arxiv_ids):
-    semantic_ids = {}
-
-    def fetch_batch(session, batch):
-        try:
-            results = post_batch(
-                session,
-                batch,
-                fields="paperId,externalIds",
-            )
-        except SplitBatch:
-            middle = len(batch) // 2
-            fetch_batch(session, batch[:middle])
-            fetch_batch(session, batch[middle:])
-            return
-        except Exception as exc:
-            for arxiv_id in batch:
-                log_failure(
-                    arxiv_id,
-                    "Semantic Scholar reference lookup",
-                    exc,
-                    exception=exc,
-                )
-            return
-
-        for arxiv_id, result in zip(batch, results):
-            if result and result.get("paperId"):
-                semantic_ids[arxiv_id] = result["paperId"]
-
-    session = requests.Session()
-    try:
-        for start in range(0, len(arxiv_ids), S2_BATCH_SIZE):
-            fetch_batch(
-                session,
-                arxiv_ids[start:start + S2_BATCH_SIZE],
-            )
-    finally:
-        session.close()
-
-    return semantic_ids
-
-
-def build_references_table(records, papers_table):
-    paper_by_id = {paper["arxiv_id"]: paper for paper in papers_table}
+def build_references_table(records, s2_references=None):
+    s2_references = s2_references or {}
     references_by_paper = {}
     for record in records:
         citing_id = record["arxiv_id"]
-        cited_ids = references_by_paper.setdefault(citing_id, set())
-        for version in record.get("versions", []):
-            for raw_reference in version.get("raw_references") or []:
-                cited_ids.update(extract_citation_arxiv_ids(raw_reference))
+        enrichment = s2_references.get(citing_id)
+        if enrichment is None:
+            continue
 
-    all_cited_ids = sorted({
-        cited_id
-        for cited_ids in references_by_paper.values()
-        for cited_id in cited_ids
-    })
-    missing_local_ids = [
-        arxiv_id
-        for arxiv_id in all_cited_ids
-        if arxiv_id not in paper_by_id
-    ]
-    external_metadata = _fetch_arxiv_metadata(missing_local_ids)
-    semantic_ids = _fetch_semantic_scholar_ids(all_cited_ids)
+        cited_by_id = references_by_paper.setdefault(citing_id, {})
+        for reference in enrichment.get("s2_references") or []:
+            arxiv_id = reference.get("arxiv_id")
+            if not isinstance(arxiv_id, str) or not arxiv_id.strip():
+                continue
+            arxiv_id = clean_arxiv_id(arxiv_id)
+            if "/" in arxiv_id:
+                arxiv_id = arxiv_id.lower()
+            cited_by_id.setdefault(arxiv_id, reference)
 
     rows = []
     for citing_id in sorted(references_by_paper):
-        for cited_id in sorted(references_by_paper[citing_id]):
-            paper = paper_by_id.get(cited_id)
-            metadata = external_metadata.get(cited_id, {})
+        for cited_id, reference in sorted(
+            references_by_paper[citing_id].items()
+        ):
             rows.append({
                 "arxiv_id": citing_id,
                 "ref_arxiv_id": cited_id,
-                "ref_title": (
-                    paper.get("title") if paper else metadata.get("title")
-                ),
-                "ref_authors": (
-                    paper.get("authors") if paper else metadata.get("authors", [])
-                ),
-                "ref_submission_date": (
-                    paper.get("submission_date")
-                    if paper
-                    else metadata.get("submission_date")
-                ),
-                "ref_s2_id": semantic_ids.get(cited_id),
+                "ref_title": reference.get("title"),
+                "ref_authors": reference.get("authors") or [],
+                "ref_submission_date": reference.get("submission_date"),
+                "ref_s2_id": reference.get("s2_id"),
             })
     return rows
 
@@ -310,8 +151,9 @@ def _write_jsonl_atomic(path, rows):
 def export_tables(source_path=JSONL_FILE):
     """Write the normalized paper and arXiv-reference JSONL tables."""
     records = _read_paper_records(Path(source_path))
-    papers_table = build_papers_table(records, load_s2_references())
-    references_table = build_references_table(records, papers_table)
+    s2_references = load_s2_references()
+    papers_table = build_papers_table(records, s2_references)
+    references_table = build_references_table(records, s2_references)
     _write_jsonl_atomic(PAPERS_TABLE_FILE, papers_table)
     _write_jsonl_atomic(REFERENCES_TABLE_FILE, references_table)
     return {
