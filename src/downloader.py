@@ -178,7 +178,7 @@ def download_task(worker_id, task, extraction_queue, session):
     destination = RAW_DIR / arxiv_id / version
     destination.parent.mkdir(parents=True, exist_ok=True)
 
-    url = f"https://arxiv.org/src/{version_id}"
+    url = f"https://export.arxiv.org/src/{version_id}"
 
     # Reuse completed extractions without downloading again.
     if (
