@@ -1,5 +1,8 @@
 import os
 from pathlib import Path
+from dotenv import load_dotenv
+
+load_dotenv()
 
 ROOT = Path.cwd()
 
@@ -20,8 +23,8 @@ PARSED_VERSIONS_FILE = PROCESSED_DIR / "versions.jsonl"
 
 BATCH_SIZE = 50
 
-NUM_DOWNLOADERS = 4
-NUM_EXTRACTORS = 4
+NUM_DOWNLOADERS = 2
+NUM_EXTRACTORS = 2
 
 DOWNLOAD_QUEUE_SIZE =  BATCH_SIZE * 4
 EXTRACTION_QUEUE_SIZE = BATCH_SIZE * 4
