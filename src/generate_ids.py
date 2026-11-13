@@ -103,7 +103,7 @@ if __name__ == '__main__':
     generate_arxiv_ids(
         start_id=16045,
         start_month='2024-08',
-        end_id=16100,
+        end_id=17500,
         end_month='2024-08',
         output_path=IDS_FILE
     )
