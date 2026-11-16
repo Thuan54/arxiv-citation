@@ -1,5 +1,6 @@
 import json
 from pathlib import Path
+import re
 
 from config import (
     JSONL_FILE,
@@ -75,7 +76,7 @@ def build_papers_table(records, s2_references=None):
         for version, metadata in zip(versions, metadata_by_version):
             if _version_number(version.get("version", "")) <= 1:
                 continue
-            revised_date = metadata.get("updated_date")
+            revised_date = metadata.get("version_date")
             if (
                 revised_date
                 and revised_date != initial_date
