@@ -79,7 +79,6 @@ def build_papers_table(records, s2_references=None):
             revised_date = metadata.get("version_date")
             if (
                 revised_date
-                and revised_date != initial_date
                 and revised_date not in seen_dates
             ):
                 revised_dates.append(revised_date)
