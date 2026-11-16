@@ -2,23 +2,40 @@
 
 Run from the repository root after Milestone 1:
 
-    python src/parse_corpus.py
+    python src/02_parsing/parse_corpus.py
 """
 import json
 import os
 import tempfile
 from pathlib import Path
 
-from config import (
+try:
+    from ..config import (
     ELEMENTS_FILE,
     HIERARCHY_FILE,
     JSONL_FILE,
     PARSED_VERSIONS_FILE,
     ROOT,
 )
+    from ..reference_extractor import extract_raw_references
+    from ..s2_reference_data import load_s2_references
+
+except ImportError:
+    import sys
+
+    sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
+    from config import (
+    ELEMENTS_FILE,
+    HIERARCHY_FILE,
+    JSONL_FILE,
+    PARSED_VERSIONS_FILE,
+    ROOT,
+)
+    from reference_extractor import extract_raw_references
+    from s2_reference_data import load_s2_references
+
 from hierarchy import parse_publication_sources
-from reference_extractor import extract_raw_references
-from s2_reference_data import load_s2_references
+
 
 
 OUTPUT_FILES = {

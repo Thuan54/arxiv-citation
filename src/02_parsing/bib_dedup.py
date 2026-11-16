@@ -22,7 +22,7 @@ from typing import Dict, List, Optional
 from bib_extract import (
     Entry, Name, infer_type, parse_reference, split_header, to_bibtex,
 )
-from latex_text import latex_to_text
+from latex_text  import latex_to_text
 
 SCALAR_FIELDS = [
     "title", "journal", "booktitle", "series", "volume", "number", "pages",

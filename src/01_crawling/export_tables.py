@@ -1,15 +1,29 @@
 import json
 from pathlib import Path
+import re
 
-from config import (
+try:
+    from ..config import (
     JSONL_FILE,
     PAPERS_TABLE_FILE,
     REFERENCES_TABLE_FILE,
     VENUE_FROM_S2_FALLBACK,
 )
-from helper import clean_arxiv_id
-from s2_reference_data import load_s2_references
+    from ..s2_reference_data import load_s2_references
+except ImportError:
+    import sys
+    from pathlib import Path
 
+    sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
+    from config import (
+    JSONL_FILE,
+    PAPERS_TABLE_FILE,
+    REFERENCES_TABLE_FILE,
+    VENUE_FROM_S2_FALLBACK,
+)
+    from s2_reference_data import load_s2_references
+    
+from helper import clean_arxiv_id
 
 def _read_paper_records(path):
     records = []
@@ -75,7 +89,9 @@ def build_papers_table(records, s2_references=None):
         for version, metadata in zip(versions, metadata_by_version):
             if _version_number(version.get("version", "")) <= 1:
                 continue
-            revised_date = metadata.get("updated_date")
+            # metadata.py stores <updated> of each version as "version_date";
+            # nothing ever wrote "updated_date", so this used to be always None.
+            revised_date = metadata.get("version_date")
             if (
                 revised_date
                 and revised_date != initial_date
@@ -159,4 +175,7 @@ def export_tables(source_path=JSONL_FILE):
     return {
         "papers": len(papers_table),
         "references": len(references_table),
+        "papers_with_revised_dates": sum(1 for row in papers_table if row["revised_dates"]),
+        "papers_with_venue": sum(1 for row in papers_table if row["venue"]),
+        "s2_rows_loaded": len(s2_references),
     }

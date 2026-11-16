@@ -1,7 +1,15 @@
 import xml.etree.ElementTree as ET
 import requests
 
-from config import API_INTERVAL, API_TIMEOUT, BATCH_SIZE, USER_AGENT
+try:
+    from ..config import API_INTERVAL, API_TIMEOUT, BATCH_SIZE, USER_AGENT
+except ImportError:
+    import sys
+    from pathlib import Path
+
+    sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
+    from config import API_INTERVAL, API_TIMEOUT, BATCH_SIZE, USER_AGENT
+
 from helper import log_failure, parse_versioned_id
 from logger import get_logger
 from metric import metrics

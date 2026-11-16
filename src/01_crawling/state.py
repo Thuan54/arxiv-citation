@@ -1,7 +1,15 @@
 import json
 import threading
 
-from config import JSONL_FILE
+try:
+    from ..config import JSONL_FILE
+except ImportError:
+    import sys
+    from pathlib import Path
+
+    sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
+    from ..config import JSONL_FILE
+    
 from logger import get_logger
 
 _lock = threading.Lock()

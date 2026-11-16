@@ -14,8 +14,16 @@ import json
 import shutil
 from collections import Counter
 
-from config import JSONL_FILE, ROOT
-from reference_extractor import extract_raw_references
+try:
+    from ..config import JSONL_FILE, ROOT
+    from ..reference_extractor import extract_raw_references
+except ImportError:
+    import sys
+    from pathlib import Path
+
+    sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
+    from config import JSONL_FILE, ROOT
+    from reference_extractor import extract_raw_references
 
 
 def main():
@@ -108,3 +116,4 @@ def main():
 
 if __name__ == "__main__":
     main()
+    
