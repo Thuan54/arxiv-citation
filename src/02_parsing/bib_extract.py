@@ -751,7 +751,62 @@ def parse_reference(raw: str) -> Entry:
     """Parse one raw bibliography entry into an :class:`Entry`."""
     stripped = raw.strip()
 
-    if re.match(r"\\entry\s*\{", stripped):
+    if stripped.startswith("@"):
+        m = re.match(r"@([A-Za-z]+)\s*\{\s*([^,\s{}]+)\s*,", stripped)
+        btype = m.group(1).lower() if m else "misc"
+        key = m.group(2).strip() if m else None
+        entry = Entry(
+            key=key,
+            entry_type=_BIBLATEX_TYPES.get(btype, "misc"),
+            raw=stripped,
+            style="bibtex",
+        )
+        vals: Dict[str, str] = {}
+        body = stripped[m.end():] if m else stripped
+        for fm in re.finditer(r"([A-Za-z_][\w\-]*)\s*=\s*", body):
+            fname = fm.group(1).lower()
+            pos = fm.end()
+            while pos < len(body) and body[pos].isspace():
+                pos += 1
+            if pos >= len(body):
+                continue
+            if body[pos] == "{":
+                end = balanced_group(body, pos)
+                val = body[pos + 1:end - 1] if end else ""
+            elif body[pos] == '"':
+                end_q = re.search(r'(?<!\\)"', body[pos + 1:])
+                val = body[pos + 1:pos + 1 + end_q.start()] if end_q else ""
+            else:
+                end_v = re.search(r"[,\n}]", body[pos:])
+                val = body[pos:pos + end_v.start()].strip() if end_v else body[pos:].strip()
+            vals.setdefault(fname, val.strip())
+
+        if vals.get("author"):
+            entry.authors, entry.et_al = parse_authors(vals["author"])
+        if vals.get("editor"):
+            entry.editors, _ = parse_authors(vals["editor"])
+        f = entry.fields
+        f["title"] = tidy(clean(vals.get("title", "")), title=True)
+        f["journal"] = tidy(clean(vals.get("journal") or vals.get("journaltitle") or ""))
+        f["booktitle"] = tidy(clean(vals.get("booktitle", "")))
+        f["publisher"] = tidy(clean(vals.get("publisher", "")))
+        f["address"] = tidy(clean(vals.get("address") or vals.get("location") or ""))
+        f["volume"] = tidy(clean(vals.get("volume", "")))
+        f["number"] = tidy(clean(vals.get("number", "")))
+        f["series"] = tidy(clean(vals.get("series", "")))
+        pages = clean(vals.get("pages", ""))
+        f["pages"] = re.sub(r"\s*[-–—]+\s*", "--", pages) if pages else None
+        f["doi"] = find_doi(vals.get("doi", "")) or find_doi(stripped)
+        f["url"] = (vals.get("url") or "").strip() or find_url(stripped)
+        f["eprint"] = (
+            find_arxiv(f"arXiv:{vals['eprint']}")
+            if vals.get("eprint") else find_arxiv(stripped)
+        )
+        year_src = vals.get("year") or vals.get("date") or ""
+        f["year"] = find_year(year_src) if year_src else find_year(clean(stripped))
+        f["note"] = tidy(clean(vals.get("note", "")))
+        f["howpublished"] = tidy(clean(vals.get("howpublished", "")))
+    elif re.match(r"\\entry\s*\{", stripped):
         entry = parse_biblatex(stripped)
     else:
         key, label, body = split_header(stripped)
@@ -774,7 +829,6 @@ def parse_reference(raw: str) -> Entry:
         if f[k] in ("", None):
             f[k] = None
     return entry
-
 
 # --------------------------------------------------------------------------
 # BibTeX rendering

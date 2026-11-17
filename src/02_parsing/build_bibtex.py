@@ -54,11 +54,32 @@ def table_rows(result: dict):
 
 
 def versions_of(record: dict) -> dict:
-    """{version number: raw references}; a version without sources stays (empty)."""
-    return {
-        int(v["version"].lstrip("v")): list(v.get("raw_references") or [])
-        for v in record.get("versions", [])
-    }
+    """{version number: raw references}; extracts from latex_source_path if missing."""
+    try:
+        from reference_extractor import extract_raw_references
+    except ImportError:
+        import sys
+        sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
+        from reference_extractor import extract_raw_references
+
+    root = Path.cwd()
+    out = {}
+    for v in record.get("versions", []):
+        ver_num = int(str(v.get("version", "v1")).lstrip("v"))
+        refs = v.get("raw_references")
+        if not refs:
+            source_path = v.get("latex_source_path")
+            if source_path:
+                directory = Path(source_path)
+                if not directory.is_absolute():
+                    directory = root / directory
+                if directory.is_dir():
+                    try:
+                        refs = extract_raw_references(directory)
+                    except (OSError, UnicodeError, ValueError):
+                        refs = []
+        out[ver_num] = list(refs or [])
+    return out
 
 
 def max_rss_mb() -> float:
