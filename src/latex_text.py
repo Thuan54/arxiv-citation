@@ -130,7 +130,7 @@ def latex_to_text(source, keep_math=True):
     s = re.sub(r"(?<!\\)%.*", "", s)             # comments / BibitemOpen%
     s = s.replace("\\\\", " ")                   # forced line breaks
 
-    s = s.replace("\\'\\'", "\u201d")                 # IEEE-style \'\' closing quotes
+    s = s.replace("\\'\\'", "\u201d")            # IEEE-style \'\' closing quotes
 
     # Protect escaped characters that would confuse later steps.
     s = s.replace("\\$", "\x02").replace("\\{", "\x03").replace("\\}", "\x04")
@@ -158,8 +158,35 @@ def latex_to_text(source, keep_math=True):
     s = re.sub(r"\\([ij])(?![A-Za-z])\s*", r"\1", s)   # dotless i / j
 
     # Links: keep the visible text (or the URL when there is none).
-    for _ in range(3):
-        s = re.sub(r"\\href\s*\{[^{}]*\}\s*\{([^{}]*)\}", r"\1", s)
+    # Links: unwrap \href{url}{visible_text} supporting nested braces in visible_text.
+    href_pat = re.compile(r"\\href\s*\{")
+    pos = 0
+    out_parts = []
+    while True:
+        m = href_pat.search(s, pos)
+        if not m:
+            out_parts.append(s[pos:])
+            break
+        out_parts.append(s[pos:m.start()])
+        url_end = balanced_group(s, m.end() - 1)
+        if not url_end:
+            out_parts.append(s[m.start():m.end()])
+            pos = m.end()
+            continue
+        k = url_end
+        while k < len(s) and s[k].isspace():
+            k += 1
+        if k < len(s) and s[k] == "{":
+            txt_end = balanced_group(s, k)
+            if txt_end:
+                vis = s[k + 1:txt_end - 1].strip()
+                out_parts.append(vis if vis else s[m.end():url_end - 1])
+                pos = txt_end
+                continue
+        out_parts.append(s[m.end():url_end - 1])
+        pos = url_end
+    s = "".join(out_parts)
+
     s = re.sub(r"\\(?:url|doi)\s*\{([^{}]*)\}", r"\1", s)
 
     s = re.sub(

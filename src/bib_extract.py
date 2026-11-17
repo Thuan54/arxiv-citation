@@ -148,7 +148,7 @@ def parse_authors(raw: str) -> Tuple[List[Name], bool]:
     text = _strip_name(re.sub(r"^\s*(?:by|edited by)\s+", "", text, flags=re.I))
 
     et_al = False
-    m = re.search(r"(?:[,;]?\s*(?:and\s+)?(?:et\.?\s*al\.?|others))\s*$", text, re.I)
+    m = re.search(r"(?:[,;]?\s*(?:and\s+)?(?:et\.?\s*al\.?|others))\b.*$", text, re.I)
     if m:
         et_al, text = True, _strip_name(text[:m.start()])
 
@@ -162,7 +162,20 @@ def parse_authors(raw: str) -> Tuple[List[Name], bool]:
         parts = re.split(r"\s*,?\s+(?:and|&)\s+", text)
         pieces = [q for p in parts for q in _split_comma_part(p)]
 
-    names = [n for n in (name_from_string(p) for p in pieces) if n and n.family]
+    non_person_re = re.compile(
+        r"(?i)\b(?:collaboration|working\s+group|consortium|experiment|team|group|project)\b"
+        r"|https?://|doi\.org|arxiv|\d{3,}"
+    )
+    cleaned_pieces = []
+    for p in pieces:
+        p = re.sub(r"(?i)\b(?:et\.?\s*al\.?|others)\b.*$", "", p).strip(" ,;.")
+        if not p or non_person_re.search(p):
+            continue
+        if len(p.split()) > 6:
+            continue
+        cleaned_pieces.append(p)
+
+    names = [n for n in (name_from_string(p) for p in cleaned_pieces) if n and n.family]
     return names, et_al
 
 
@@ -196,12 +209,23 @@ def find_arxiv(raw: str) -> Optional[str]:
 
 
 def find_url(raw: str) -> Optional[str]:
+    url = None
     for pattern in (r"\\b?url\s*\{([^{}]+)\}", r"\\href\s*\{([^{}]+)\}"):
         m = re.search(pattern, raw)
         if m:
-            return m.group(1).replace("\\_", "_").replace("\\%", "%").strip().rstrip(".,;")
-    m = _URL_RE.search(raw.replace("\\_", "_").replace("\\%", "%"))
-    return m.group(1).rstrip(".,;)") if m else None
+            url = m.group(1).replace("\\_", "_").replace("\\%", "%").strip().rstrip(".,;")
+            break
+    if not url:
+        m = _URL_RE.search(raw.replace("\\_", "_").replace("\\%", "%"))
+        url = m.group(1).rstrip(".,;)") if m else None
+    if url:
+        url = re.sub(
+            r"^https?://(?:dx\.)?doi\.org/(https?://(?:dx\.)?doi\.org/)",
+            r"\1",
+            url,
+            flags=re.I,
+        )
+    return url
 
 
 def _strip_ids(text: str, ranges: bool = True) -> str:
@@ -602,6 +626,8 @@ def _venue_from_text(entry: Entry, venue_raw: str, is_book: bool = False):
     f = entry.fields
     venue_raw = re.sub(r"\\(?:url|doi)\s*\{[^{}]*\}", " ", venue_raw)
     venue_raw = _DOI_RE.sub(" ", _URL_RE.sub(" ", venue_raw))
+    venue_raw = _ARXIV_NEW.sub(" ", _ARXIV_OLD.sub(" ", venue_raw))
+    venue_raw = re.sub(r"\[\s*\]", " ", venue_raw)
     venue_raw = re.sub(r"(?i)\b(?:doi|url)\s*:\s*|\[?\s*online\s*\]?\.?\s*(?:available\s*:)?", " ", venue_raw)
     venue_raw = venue_raw.strip()
     if not venue_raw:
@@ -625,7 +651,12 @@ def _venue_from_text(entry: Entry, venue_raw: str, is_book: bool = False):
     else:
         numbers_src = plain
         text = re.sub(r"(?i)^in\s+", "", plain)
-        head = re.split(r",\s*(?:pp?\.|pages|vol|volume|no\.|number|\d)|\s*\(\s*\d{4}", text)[0].strip(" .,")
+        head = re.split(
+            r",\s*(?:pp?\.|pages|vol|volume|no\.|number|\d)"
+            r"|\s+\d+\s*\("
+            r"|\s*\(\s*(?:[A-Za-z]{3,9}\.?\s*)?\d{4}",
+            text,
+        )[0].strip(" .,")
         m = re.match(r"^([A-Z][\w .\-]+):\s*(.+?)(?:,\s*(?:19|20)\d\d)?\.?$", head)
         if in_prefix:
             _assign_venue(f, head.split(". ")[0], "booktitle")
@@ -634,12 +665,11 @@ def _venue_from_text(entry: Entry, venue_raw: str, is_book: bool = False):
         elif m:
             f["address"], f["publisher"] = tidy(m.group(1)), tidy(m.group(2))
         elif head and not re.search(r"\d", head) and len(head.split()) <= 6 and not is_book:
-            # "Springer", "Wiley", ... or the start of "Journal Name, 12, 345"
             parts = [p.strip() for p in plain.split(",")]
             tail = re.sub(r"\(\s*\d{4}[a-z]?\s*\)", "", parts[1]).strip(" .") if len(parts) > 1 else ""
             abbreviations = re.findall(r"\b[A-Z][A-Za-z]{0,6}\.", parts[0])
             if re.fullmatch(_PAGES, tail) or len(abbreviations) >= 2:
-                _assign_venue(f, parts[0], "journal")    # "Indiana Univ. Math. J., 1853--1886"
+                _assign_venue(f, parts[0], "journal")
             else:
                 f["publisher"] = tidy(head)
         elif is_book:
@@ -661,6 +691,37 @@ def parse_generic(body: str, raw: str, label: Optional[str]) -> Entry:
     text = _NOISE.sub(" ", body)
     text = re.sub(r"\{\s*\}", "", text).strip()           # braces left by \natexlab{a} etc.
     f["doi"], f["url"], f["eprint"] = find_doi(text), find_url(text), find_arxiv(text)
+
+# Unwrap \href{url}{visible_text} (preserving inner \emph/\textbf markup)
+    href_pat = re.compile(r"\\href\s*\{")
+    pos = 0
+    unwrapped = []
+    while True:
+        m = href_pat.search(text, pos)
+        if not m:
+            unwrapped.append(text[pos:])
+            break
+        unwrapped.append(text[pos:m.start()])
+        u_end = balanced_group(text, m.end() - 1)
+        if not u_end:
+            unwrapped.append(text[m.start():m.end()])
+            pos = m.end()
+            continue
+        k = u_end
+        while k < len(text) and text[k].isspace():
+            k += 1
+        if k < len(text) and text[k] == "{":
+            t_end = balanced_group(text, k)
+            if t_end:
+                vis = text[k + 1:t_end - 1].strip()
+                if vis:
+                    unwrapped.append(vis)
+                pos = t_end
+                continue
+        pos = u_end
+    text = "".join(unwrapped)
+    text = re.sub(r"\\(?:url|doi)\s*\{[^{}]*\}", " ", text).strip()
+
 
     blocks = [b.strip() for b in re.split(r"\\newblock\b", text) if b.strip()]
     year_hint = None
@@ -691,6 +752,8 @@ def parse_generic(body: str, raw: str, label: Optional[str]) -> Entry:
             m = pattern.search(one)
             if m and (quote is None or m.start() < quote.start()):
                 quote = m
+
+        emph = _first_emph(one) if not quote else None
         apa = re.match(r"^(?P<a>[^()]+?)\s*\(\s*(?P<y>(?:1[5-9]|20)\d\d)[a-z]?\s*\)\s*[.,]\s*(?P<r>.+)$", one, re.S)
         astro = re.match(r"^(?P<a>[^()]*?[A-Za-z][^()]*?)[,\s]+(?P<y>(?:1[5-9]|20)\d\d)[a-z]?\s*[,.]\s*(?P<r>.*)$", one, re.S)
 
@@ -698,6 +761,33 @@ def parse_generic(body: str, raw: str, label: Optional[str]) -> Entry:
             entry.authors, entry.et_al = parse_authors(one[:quote.start()])
             f["title"] = tidy(clean(quote.group(1)), title=True)
             _venue_from_text(entry, one[quote.end():])
+
+        elif emph and emph[0] > 2:
+            # JHEP / SciPost / revtex / plain: "Authors, \emph{Title}, \emph{Journal} \textbf{vol} (year) page"
+            # or title-less: "Authors, \emph{Journal} \textbf{vol} (year) page"
+            authors_raw = one[:emph[0]].rstrip(" ,;.")
+            m_yr = re.search(r"[\s,]+\(?((?:1[5-9]|20)\d\d)[a-z]?\)?\s*$", authors_raw)
+            if m_yr:
+                year_hint, authors_raw = int(m_yr.group(1)), authors_raw[:m_yr.start()]
+            entry.authors, entry.et_al = parse_authors(authors_raw)
+
+            emph_clean = clean(emph[2]).strip(" .,")
+            after_raw = one[emph[1]:].lstrip(" ,;.")
+            second_emph = _first_emph(after_raw)
+            looks_like_venue_only = (
+                second_emph is None
+                and bool(re.match(r"^(?:\\textbf\s*\{|\d|\(\s*(?:1[5-9]|20)\d\d)", after_raw))
+                and (
+                    _JOURNAL_WORDS.search(emph_clean)
+                    or _CONF_WORDS.search(emph_clean)
+                    or bool(re.fullmatch(r"[A-Z][A-Za-z.\s&]{0,25}", emph_clean))
+                )
+            )
+            if looks_like_venue_only:
+                _venue_from_text(entry, one[emph[0]:])
+            else:
+                f["title"] = tidy(emph_clean, title=True)
+                _venue_from_text(entry, after_raw)
         elif apa and "," in apa.group("a"):
             year_hint = int(apa.group("y"))
             entry.authors, entry.et_al = parse_authors(apa.group("a"))
@@ -736,6 +826,11 @@ def parse_generic(body: str, raw: str, label: Optional[str]) -> Entry:
     f["year"] = find_year(clean(text)) if year_hint is None else year_hint
     if f["year"] is None:
         f["year"] = _label_year(label)
+    if f["year"] is None and f.get("eprint"):
+        m_ep = re.match(r"^(\d{2})\d{2}\.\d+", str(f["eprint"]))
+        if m_ep:
+            yy = int(m_ep.group(1))
+            f["year"] = (2000 + yy) if yy <= 30 else (1900 + yy)
     if not entry.authors:
         surname = _label_surname(label)
         if surname:
