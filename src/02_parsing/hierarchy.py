@@ -243,7 +243,7 @@ def clean_latex(text, preserve_math=False):
         return f"ZZMATHBLOCK{len(math_blocks) - 1}ZZ"
 
     text = re.sub(
-        r"\$(?:\\.|[^$])+\$|"
+        r"\$(?:[^$\\]|\\.)+\$|"
         r"\\begin\s*\{(?:equation|align|gather|multline|flalign|"
         r"alignat|eqnarray|displaymath)[^}]*\}"
         r".*?\\end\s*\{(?:equation|align|gather|multline|flalign|"
@@ -283,8 +283,12 @@ def clean_latex(text, preserve_math=False):
     text = re.sub(r"~", " ", text)
     text = re.sub(r"\s+", " ", text)
     text = re.sub(r"\s+([,.;:!?])", r"\1", text)
-    for index, math in enumerate(math_blocks):
-        text = text.replace(f"ZZMATHBLOCK{index}ZZ", math)
+    if math_blocks:
+        text = re.sub(
+            r"ZZMATHBLOCK(\d+)ZZ",
+            lambda match: math_blocks[int(match.group(1))],
+            text,
+        )
     return text.strip()
 
 
@@ -304,13 +308,14 @@ def _split_sentences(text):
         hide,
         text,
     )
-    text = re.sub(r"\$(?:\\.|[^$])+\$", hide, text)
+    text = re.sub(r"\$(?:[^$\\]|\\.)+\$", hide, text)
     text = re.sub(r"https?://[^\s]*[A-Za-z0-9/#]", hide, text)
     boundaries = []
     for match in re.finditer(r"[.!?]+[\"')\]]*(?:\s+|$)", text):
         if text[match.start()] == ".":
+            window_start = max(0, match.start() - 12)
             dotted_prefix = (
-                text[:match.start()].rstrip() + "."
+                text[window_start:match.start()].rstrip() + "."
             ).lower()
             if any(dotted_prefix.endswith(item) for item in ABBREVIATIONS):
                 continue
@@ -337,9 +342,10 @@ def _split_sentences(text):
     remainder = text[start:].strip()
     if remainder:
         sentences.append(remainder)
-    for index, value in enumerate(protected):
+    if protected:
+        restore_re = re.compile(r"ZZPROTECTED(\d+)ZZ")
         sentences = [
-            sentence.replace(f"ZZPROTECTED{index}ZZ", value)
+            restore_re.sub(lambda m: protected[int(m.group(1))], sentence)
             for sentence in sentences
         ]
     return sentences

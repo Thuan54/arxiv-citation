@@ -94,6 +94,10 @@ def parse_corpus(source_file=JSONL_FILE):
                     str(item.get("version", "v1")).lstrip("v")
                 ),
             )
+            version_by_number = {
+                int(str(item.get("version", "v1")).lstrip("v")): item
+                for item in versions
+            }
             version_directories = [
                 (
                     str(item.get("version", "v1")),
@@ -121,6 +125,17 @@ def parse_corpus(source_file=JSONL_FILE):
 
             for version, directory in version_directories:
                 version_number = int(version.lstrip("v"))
+                source_version = version_by_number.get(version_number, {})
+                existing_refs = source_version.get("raw_references")
+                if existing_refs:
+                    references_by_version[version_number] = {
+                        "raw_references": existing_refs,
+                        "reference_extraction_status": "complete",
+                        "reference_files_scanned": 0,
+                        "reference_extraction_errors": [],
+                    }
+                    continue
+
                 report = {}
                 if directory is not None and directory.is_dir():
                     try:
@@ -151,27 +166,19 @@ def parse_corpus(source_file=JSONL_FILE):
                             "reference_extraction_errors": report["read_failures"],
                         }
                 else:
-                    legacy_references = next(
-                        (
-                            item.get("raw_references", [])
-                            for item in versions
-                            if int(
-                                str(item.get("version", "v1")).lstrip("v")
-                            ) == version_number
-                        ),
-                        [],
-                    )
                     references_by_version[version_number] = {
-                        "raw_references": legacy_references,
+                        "raw_references": existing_refs or [],
                         "reference_extraction_status": "source_unavailable",
                         "reference_files_scanned": 0,
                         "reference_extraction_errors": [],
                     }
 
+            enrichment = s2_references.get(arxiv_id)
             for parsed_version in parsed_versions:
+                version_number = parsed_version["version"]
                 parsed_version.update(
                     references_by_version.get(
-                        parsed_version["version"],
+                        version_number,
                         {
                             "raw_references": [],
                             "reference_extraction_status": "failed",
@@ -180,15 +187,7 @@ def parse_corpus(source_file=JSONL_FILE):
                         },
                     )
                 )
-                source_version = next(
-                    (
-                        item for item in versions
-                        if int(str(item.get("version", "v1")).lstrip("v"))
-                        == parsed_version["version"]
-                    ),
-                    {},
-                )
-                enrichment = s2_references.get(arxiv_id)
+                source_version = version_by_number.get(version_number, {})
                 parsed_version["s2_references"] = (
                     enrichment["s2_references"]
                     if enrichment is not None

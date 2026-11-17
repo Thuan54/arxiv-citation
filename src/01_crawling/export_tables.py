@@ -46,17 +46,19 @@ def _version_number(version):
 
 
 def build_papers_table(records, s2_references=None):
-    s2_references = s2_references or {}
+    if s2_references is None:
+        s2_references = {}
+
     rows = []
-    for record in records:
+    for record in sorted(records, key=lambda item: item.get("arxiv_id", "")):
         versions = sorted(
             record.get("versions", []),
             key=lambda item: _version_number(item.get("version", "")),
         )
         enrichment = s2_references.get(record["arxiv_id"])
         metadata_by_version = []
-        for item in versions:
-            metadata = dict(item.get("metadata") or {})
+        for version in versions:
+            metadata = dict(version.get("metadata") or {})
             if (
                 enrichment is not None
                 and VENUE_FROM_S2_FALLBACK
@@ -74,24 +76,25 @@ def build_papers_table(records, s2_references=None):
             ),
             {},
         )
+        initial_date = initial_metadata.get("submission_date")
+
         latest_metadata = next(
             (
                 metadata
                 for metadata in reversed(metadata_by_version)
-                if metadata
+                if metadata.get("title") or metadata.get("authors")
             ),
-            {},
+            metadata_by_version[-1] if metadata_by_version else {},
         )
 
-        initial_date = initial_metadata.get("submission_date")
         revised_dates = []
         seen_dates = set()
         for version, metadata in zip(versions, metadata_by_version):
             if _version_number(version.get("version", "")) <= 1:
                 continue
-            # metadata.py stores <updated> of each version as "version_date";
-            # nothing ever wrote "updated_date", so this used to be always None.
-            revised_date = metadata.get("version_date")
+            revised_date = (
+                metadata.get("version_date") or metadata.get("updated_date")
+            )
             if (
                 revised_date
                 and revised_date != initial_date
@@ -108,6 +111,7 @@ def build_papers_table(records, s2_references=None):
             ),
             None,
         )
+
         rows.append({
             "arxiv_id": record["arxiv_id"],
             "title": latest_metadata.get("title"),
