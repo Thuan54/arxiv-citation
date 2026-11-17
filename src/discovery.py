@@ -5,16 +5,7 @@ import xml.etree.ElementTree as ET
 import requests
 
 
-try:
-    from ..config import (
-    API_INTERVAL, API_TIMEOUT, BATCH_SIZE, IDS_FILE, JSONL_FILE, USER_AGENT,
-)
-except ImportError:
-    import sys
-    from pathlib import Path
-
-    sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
-    from config import (
+from config import (
     API_INTERVAL, API_TIMEOUT, BATCH_SIZE, IDS_FILE, JSONL_FILE, USER_AGENT,
 )
 

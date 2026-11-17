@@ -6,14 +6,7 @@ from collections import defaultdict
 from contextlib import contextmanager
 from pathlib import Path
 
-try:
-    from ..config import METRICS_FILE, NUM_EXTRACTORS
-except ImportError:
-    import sys
-    from pathlib import Path
-
-    sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
-    from config import METRICS_FILE, NUM_EXTRACTORS
+from config import METRICS_FILE, NUM_EXTRACTORS
 
 from logger import get_logger
 

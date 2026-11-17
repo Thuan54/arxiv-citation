@@ -2,26 +2,13 @@ import json
 from pathlib import Path
 import re
 
-try:
-    from ..config import (
+from config import (
     JSONL_FILE,
     PAPERS_TABLE_FILE,
     REFERENCES_TABLE_FILE,
     VENUE_FROM_S2_FALLBACK,
 )
-    from ..s2_reference_data import load_s2_references
-except ImportError:
-    import sys
-    from pathlib import Path
-
-    sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
-    from config import (
-    JSONL_FILE,
-    PAPERS_TABLE_FILE,
-    REFERENCES_TABLE_FILE,
-    VENUE_FROM_S2_FALLBACK,
-)
-    from s2_reference_data import load_s2_references
+from s2_reference_data import load_s2_references
     
 from helper import clean_arxiv_id
 

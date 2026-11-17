@@ -5,14 +5,7 @@ import time
 
 from logger import get_logger
 
-try:
-    from ..config import MONITOR_ENABLED
-except ImportError:
-    import sys
-    from pathlib import Path
-
-    sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
-    from config import MONITOR_ENABLED
+from config import MONITOR_ENABLED
 
 
 logger = get_logger("pipeline.worker")

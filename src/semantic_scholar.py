@@ -6,16 +6,7 @@ automatically, and transient errors are retried.
 """
 import requests
 
-try:
-    from ..config import (
-    S2_API_KEY, S2_MAX_ATTEMPTS, S2_TIMEOUT, USER_AGENT,
-)
-except ImportError:
-    import sys
-    from pathlib import Path
-
-    sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
-    from config import (
+from config import (
     S2_API_KEY, S2_MAX_ATTEMPTS, S2_TIMEOUT, USER_AGENT,
 )
 from helper import format_error
