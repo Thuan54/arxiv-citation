@@ -138,7 +138,7 @@ def main():
             out.write(json.dumps(enrichment, ensure_ascii=False) + "\n")
     tmp_file.replace(S2_REFERENCES_FILE)
     print(f"Wrote {S2_REFERENCES_FILE}")
-    print(f"Exported tables: {export_tables()}")
+    print(f"Exported tables: {export_tables(resume=False)}")
 
 
 if __name__ == "__main__":
