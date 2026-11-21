@@ -4,9 +4,9 @@ Run from the repository root after Milestone 1:
 
     python src/02_parsing/parse_corpus.py
 """
+import argparse
 import json
 import os
-import tempfile
 from pathlib import Path
 
 try:
@@ -34,7 +34,10 @@ except ImportError:
     from reference_extractor import extract_raw_references
     from s2_reference_data import load_s2_references
 
-from hierarchy import parse_publication_sources
+try:
+    from .hierarchy import parse_publication_sources
+except ImportError:
+    from hierarchy import parse_publication_sources
 
 
 
@@ -67,27 +70,51 @@ def _source_directory(source_path):
     return path.resolve()
 
 
-def parse_corpus(source_file=JSONL_FILE):
-    temporary_files = {}
-    output_streams = {}
+def _load_processed_arxiv_ids(versions_path):
+    """Read already processed arxiv_ids from existing versions.jsonl."""
+    if not versions_path.exists():
+        return set()
+    processed = set()
+    with versions_path.open("r", encoding="utf-8") as f:
+        for line in f:
+            line = line.strip()
+            if not line:
+                continue
+            try:
+                row = json.loads(line)
+                if "arxiv_id" in row:
+                    processed.add(str(row["arxiv_id"]))
+            except json.JSONDecodeError:
+                continue
+    return processed
+
+
+def parse_corpus(source_file=JSONL_FILE, resume=True):
     counts = {name: 0 for name in OUTPUT_FILES}
     s2_references = load_s2_references()
+
+    for output_path in OUTPUT_FILES.values():
+        output_path.parent.mkdir(parents=True, exist_ok=True)
+
+    processed_arxiv_ids = set()
+    if resume and OUTPUT_FILES["versions"].exists():
+        processed_arxiv_ids = _load_processed_arxiv_ids(OUTPUT_FILES["versions"])
+        if processed_arxiv_ids:
+            print(f"Resuming parsing: {len(processed_arxiv_ids)} papers already processed.")
+
+    mode = "a" if resume else "w"
+    output_streams = {}
+
     try:
         for name, output_path in OUTPUT_FILES.items():
-            output_path.parent.mkdir(parents=True, exist_ok=True)
-            output = tempfile.NamedTemporaryFile(
-                mode="w",
-                encoding="utf-8",
-                dir=output_path.parent,
-                prefix=f".{output_path.name}.",
-                suffix=".tmp",
-                delete=False,
-            )
-            temporary_files[name] = Path(output.name)
-            output_streams[name] = output
+            output_streams[name] = output_path.open(mode, encoding="utf-8")
 
         for publication in _read_publications(Path(source_file)):
-            arxiv_id = publication["arxiv_id"]
+            arxiv_id = str(publication["arxiv_id"])
+            if resume and arxiv_id in processed_arxiv_ids:
+                print(f"[ALREADY PROCESSED] Paper {arxiv_id} - skipping")
+                continue
+
             versions = sorted(
                 publication.get("versions", []),
                 key=lambda item: int(
@@ -200,33 +227,54 @@ def parse_corpus(source_file=JSONL_FILE):
                 "versions": parsed_versions,
             }
             for name, rows in publication_rows.items():
+                stream = output_streams[name]
                 for row in rows:
-                    output_streams[name].write(
+                    stream.write(
                         json.dumps(row, ensure_ascii=False) + "\n"
                     )
+                stream.flush()
                 counts[name] += len(rows)
 
-        for output in output_streams.values():
-            output.close()
-        for name, output_path in OUTPUT_FILES.items():
-            os.replace(temporary_files[name], output_path)
+            processed_arxiv_ids.add(arxiv_id)
+            print(
+                f"[PROCESSED] Paper {arxiv_id} "
+                f"(versions: {len(parsed_versions)}, "
+                f"elements: {len(elements)}, "
+                f"hierarchy: {len(hierarchy)})"
+            )
+
     finally:
-        for output in output_streams.values():
-            if not output.closed:
-                output.close()
-        for path in temporary_files.values():
-            path.unlink(missing_ok=True)
+        for stream in output_streams.values():
+            if not stream.closed:
+                stream.close()
+
     return counts
 
 
 def main():
-    if not JSONL_FILE.exists():
+    parser = argparse.ArgumentParser(
+        description="Build Milestone 2 elements, hierarchy, and versions incrementally."
+    )
+    parser.add_argument(
+        "--source",
+        type=Path,
+        default=JSONL_FILE,
+        help="Path to input papers.jsonl (default: config.JSONL_FILE)",
+    )
+    parser.add_argument(
+        "--no-resume",
+        action="store_true",
+        help="Overwrite existing output files instead of resuming from already processed papers.",
+    )
+    args = parser.parse_args()
+
+    if not args.source.exists():
         raise SystemExit(
-            f"Milestone 1 input not found: {JSONL_FILE}. "
+            f"Milestone 1 input not found: {args.source}. "
             "Run the crawler first."
         )
-    counts = parse_corpus()
-    print("Milestone 2 parsing complete:")
+    counts = parse_corpus(source_file=args.source, resume=not args.no_resume)
+    print("\nMilestone 2 parsing complete:")
     for name, count in counts.items():
         print(f"  {name}: {count} rows")
     print(f"Output directory: {OUTPUT_FILES['elements'].parent}")
