@@ -4,6 +4,9 @@ venv
 .env
 # data
 data
+member_2_data
+
+!docs/data
 
 # Sandbox
 sandbox
@@ -13,6 +16,9 @@ __pycache__
 
 # arxiv-jupyter-book
 arxiv-jupyter-book
+
+# tmp
+tmp
 
 # note
 note
