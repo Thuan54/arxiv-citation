@@ -28,6 +28,16 @@ MACRO_DEFINITION = re.compile(
     r"\\(?:re|provide)?newcommand\s*\{?\s*$|\\(?:[gex]?def|let)\s*$"
 )
 
+CITE_COMMAND_RE = re.compile(
+    r"\\(?!(?:citeauthoryear|citenamefont|citestyle|citepunct|citemid|citedash|citeleft|citeright|citemiddle)\b)"
+    r"[A-Za-z]*[Cc]ite[A-Za-z]*\*?"
+    r"(?:\s*\([^)]*\)){0,2}"
+    r"((?:\s*(?:\[[^\]]*\]){0,2}\s*\{[^{}]*\})+)"
+)
+CITE_GROUP_RE = re.compile(r"\{([^{}]*)\}")
+NOCITE_ALL_RE = re.compile(r"\\nocite\s*\{\s*\*\s*\}")
+BIB_KEY_RE = re.compile(r"\s*([^,\s{}]+)\s*,")
+
 
 def _skip_group(text, pos, open_char, close_char, limit=None):
     stop = len(text) if limit is None else min(len(text), pos + limit)
@@ -128,26 +138,6 @@ def _extract_biblatex(text):
     return [match.group(0).strip() for match in BIBLATEX_ENTRY.finditer(text)]
 
 
-def _extract_bibtex(text):
-    entries = []
-    pos = 0
-
-    while True:
-        match = BIB_ENTRY_START.search(text, pos)
-        if match is None:
-            break
-        if match.group(1).lower() in SKIPPED_BIB_TYPES:
-            pos = match.end()
-            continue
-        end = _skip_group(text, match.end() - 1, "{", "}", limit=200_000)
-        if end is None:
-            pos = match.end()
-            continue
-        entries.append(text[match.start():end].strip())
-        pos = end
-
-    return entries
-
 
 def _read_text(path):
     data = path.read_bytes()
@@ -179,6 +169,51 @@ def _candidate_files(directory):
     return total, tex_files, bbl_files, bib_files
 
 
+def _extract_cited_keys(tex_texts):
+    """Return (lowercase cited keys, has_nocite_star) from .tex sources."""
+    cited = set()
+    nocite_all = False
+    for text in tex_texts:
+        if NOCITE_ALL_RE.search(text):
+            nocite_all = True
+        for match in CITE_COMMAND_RE.finditer(text):
+            for group in CITE_GROUP_RE.finditer(match.group(1)):
+                for key in group.group(1).split(","):
+                    key = key.strip()
+                    if key == "*":
+                        nocite_all = True
+                    elif key:
+                        cited.add(key.lower())
+    return cited, nocite_all
+
+
+def _extract_bibtex(text, cited_keys=None):
+    """Extract @type{key, ...} entries, optionally filtering to `cited_keys`."""
+    entries = []
+    pos = 0
+
+    while True:
+        match = BIB_ENTRY_START.search(text, pos)
+        if match is None:
+            break
+        end = _skip_group(text, match.end() - 1, "{", "}", limit=200_000)
+        if end is None:
+            pos = match.end()
+            continue
+        if match.group(1).lower() in SKIPPED_BIB_TYPES:
+            pos = end
+            continue
+        if cited_keys is not None:
+            key_match = BIB_KEY_RE.match(text, match.end(), end)
+            if not key_match or key_match.group(1).lower() not in cited_keys:
+                pos = end
+                continue
+        entries.append(text[match.start():end].strip())
+        pos = end
+
+    return entries
+
+
 def extract_raw_references(directory, report=None):
     """Extract bibliography source records without modifying crawler state."""
     directory = Path(directory)
@@ -187,6 +222,7 @@ def extract_raw_references(directory, report=None):
     seen = set()
     kinds = Counter()
     read_failures = []
+    tex_texts = []
 
     def add(entries, kind):
         for entry in entries:
@@ -204,19 +240,23 @@ def extract_raw_references(directory, report=None):
             read_failures.append(f"{path}: {exc}")
             continue
         text = COMMENT_PATTERN.sub("", text)
+        if path.suffix.lower() in TEX_SUFFIXES:
+            tex_texts.append(text)
         add(_extract_bibitems(text), "bibitem")
         add(_extract_plain_items(text), "item")
         if path.suffix.lower() == BBL_SUFFIX:
             add(_extract_biblatex(text), "biblatex")
 
-    if not references and INCLUDE_BIBTEX_FALLBACK:
+    if not references and INCLUDE_BIBTEX_FALLBACK and bib_files:
+        cited_keys, nocite_all = _extract_cited_keys(tex_texts)
+        key_filter = cited_keys if (cited_keys and not nocite_all) else None
         for path in bib_files:
             try:
                 text = _read_text(path)
             except OSError as exc:
                 read_failures.append(f"{path}: {exc}")
                 continue
-            add(_extract_bibtex(text), "bibtex")
+            add(_extract_bibtex(text, cited_keys=key_filter), "bibtex")
 
     if report is not None:
         report.update({
