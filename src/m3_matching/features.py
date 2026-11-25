@@ -439,10 +439,16 @@ def main():
     labels = _load_labels(Path(args.labels))
 
     pub_meta: List[Tuple[str, str, str]] = []
-    for part in ("train", "valid", "test"):
-        for src in ("manual", "auto"):
-            for aid in splits["partitions"][part][src]:
-                pub_meta.append((aid, part, src))
+    if isinstance(splits.get("partitions"), dict):
+        for part in ("train", "valid", "test"):
+            for src in ("manual", "auto"):
+                for aid in splits["partitions"][part][src]:
+                    pub_meta.append((aid, part, src))
+    else:
+        split_dict = splits.get("splits", splits)
+        for part in ("train", "valid", "test"):
+            for aid in split_dict.get(part, []):
+                pub_meta.append((aid, part, "auto"))
 
     all_rows: List[dict] = []
     for aid, part, src in pub_meta:
