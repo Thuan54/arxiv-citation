@@ -546,7 +546,7 @@ def main() -> None:
         description="Inspect M4/M5 valid errors, collisions, missed matches & 100-entry audit."
     )
     parser.add_argument("--models-dir", type=Path, default=Path("data/matching/models"))
-    parser.add_argument("--bibtex", type=Path, default=Path("data/processed/bibtex.jsonl"))
+    parser.add_argument("--bibtex", type=Path, default=Path("data/parsed/bibtex.jsonl"))
     parser.add_argument("--references", type=Path, default=Path("data/metadata/references_table.jsonl"))
     parser.add_argument("--out-dir", type=Path, default=Path("data/matching/analysis"))
     parser.add_argument(
@@ -567,7 +567,7 @@ def main() -> None:
     scored_path = args.models_dir / "valid_scored_pairs.parquet"
     if not scored_path.exists():
         raise SystemExit(
-            f"Missing {scored_path}. Run updated src/03_matching/models.py first."
+            f"Missing {scored_path}. Run updated src/m3_matching/models.py first."
         )
 
     scored_df = pd.read_parquet(scored_path)
