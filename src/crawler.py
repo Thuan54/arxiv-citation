@@ -3,20 +3,10 @@ import threading
 from queue import Queue
 from dotenv import load_dotenv
 
-try:
-    from ..config import (
+from config import (
     NUM_DOWNLOADERS, NUM_EXTRACTORS, QUEUE_SIZE,
     DOWNLOAD_QUEUE_SIZE, EXTRACTION_QUEUE_SIZE,
 )
-except ImportError:
-    import sys
-    from pathlib import Path
-
-    sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
-    from config import (
-        NUM_DOWNLOADERS, NUM_EXTRACTORS, QUEUE_SIZE,
-        DOWNLOAD_QUEUE_SIZE, EXTRACTION_QUEUE_SIZE,
-    )
 
 from discovery import iter_version_tasks
 from downloader import ( 

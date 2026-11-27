@@ -17,26 +17,13 @@ from collections import Counter
 
 import requests
 
-try:
-    from ..config import (
-    JSONL_FILE,
-    S2_API_KEY,
-    S2_REFERENCES_FILE,
-    VENUE_FROM_S2_FALLBACK,
+from config import (
+JSONL_FILE,
+S2_API_KEY,
+S2_REFERENCES_FILE,
+VENUE_FROM_S2_FALLBACK,
 )
-    from ..s2_reference_data import load_s2_references
-except ImportError:
-    import sys
-    from pathlib import Path
-
-    sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
-    from config import (
-    JSONL_FILE,
-    S2_API_KEY,
-    S2_REFERENCES_FILE,
-    VENUE_FROM_S2_FALLBACK,
-)
-    from s2_reference_data import load_s2_references
+from s2_reference_data import load_s2_references
 
 from export_tables import export_tables
 from helper import format_error, log_failure

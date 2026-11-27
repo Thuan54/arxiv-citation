@@ -55,12 +55,7 @@ def table_rows(result: dict):
 
 def versions_of(record: dict) -> dict:
     """{version number: raw references}; extracts from latex_source_path if missing."""
-    try:
-        from reference_extractor import extract_raw_references
-    except ImportError:
-        import sys
-        sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
-        from reference_extractor import extract_raw_references
+    from reference_extractor import extract_raw_references
 
     root = Path.cwd()
     out = {}

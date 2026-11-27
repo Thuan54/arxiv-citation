@@ -7,14 +7,7 @@ import time
 import traceback
 from pathlib import Path
 
-try:
-    from ..config import RAW_DIR, IMAGE_EXTENSIONS
-except ImportError:
-    import sys
-    from pathlib import Path
-
-    sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
-    from config import RAW_DIR, IMAGE_EXTENSIONS
+from config import RAW_DIR, IMAGE_EXTENSIONS
     
 from downloader import STOP
 from helper import log_failure, format_error, relative_source_path

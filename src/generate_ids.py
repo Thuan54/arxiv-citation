@@ -6,14 +6,7 @@ from pathlib import Path
 
 import requests
 
-try:
-    from ..config import IDS_FILE, API_TIMEOUT, USER_AGENT
-except ImportError:
-    import sys
-    from pathlib import Path
-
-    sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
-    from config import IDS_FILE, API_TIMEOUT, USER_AGENT
+from config import IDS_FILE, API_TIMEOUT, USER_AGENT
 
 
 API_URL = "https://export.arxiv.org/api/query"

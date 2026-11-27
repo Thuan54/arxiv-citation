@@ -9,30 +9,15 @@ import os
 import tempfile
 from pathlib import Path
 
-try:
-    from ..config import (
-    ELEMENTS_FILE,
-    HIERARCHY_FILE,
-    JSONL_FILE,
-    PARSED_VERSIONS_FILE,
-    ROOT,
+from config import (
+ELEMENTS_FILE,
+HIERARCHY_FILE,
+JSONL_FILE,
+PARSED_VERSIONS_FILE,
+ROOT,
 )
-    from ..reference_extractor import extract_raw_references
-    from ..s2_reference_data import load_s2_references
-
-except ImportError:
-    import sys
-
-    sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
-    from config import (
-    ELEMENTS_FILE,
-    HIERARCHY_FILE,
-    JSONL_FILE,
-    PARSED_VERSIONS_FILE,
-    ROOT,
-)
-    from reference_extractor import extract_raw_references
-    from s2_reference_data import load_s2_references
+from reference_extractor import extract_raw_references
+from s2_reference_data import load_s2_references
 
 from hierarchy import parse_publication_sources
 

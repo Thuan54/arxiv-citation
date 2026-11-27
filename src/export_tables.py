@@ -2,27 +2,14 @@ import json
 from pathlib import Path
 import re
 
-try:
-    from ..config import (
-    JSONL_FILE,
-    PAPERS_TABLE_FILE,
-    REFERENCES_TABLE_FILE,
-    VENUE_FROM_S2_FALLBACK,
+from config import (
+JSONL_FILE,
+PAPERS_TABLE_FILE,
+REFERENCES_TABLE_FILE,
+VENUE_FROM_S2_FALLBACK,
 )
-    from ..s2_reference_data import load_s2_references
-except ImportError:
-    import sys
-    from pathlib import Path
+from s2_reference_data import load_s2_references
 
-    sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
-    from config import (
-    JSONL_FILE,
-    PAPERS_TABLE_FILE,
-    REFERENCES_TABLE_FILE,
-    VENUE_FROM_S2_FALLBACK,
-)
-    from s2_reference_data import load_s2_references
-    
 from helper import clean_arxiv_id
 
 def _read_paper_records(path):

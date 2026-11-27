@@ -7,14 +7,7 @@ from pathlib import Path
 import requests
 
 
-try:
-    from ..config import DOWNLOAD_TIMEOUT, RAW_DIR, USER_AGENT
-except ImportError:
-    import sys
-    from pathlib import Path
-
-    sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
-    from config import DOWNLOAD_TIMEOUT, RAW_DIR, USER_AGENT
+from config import DOWNLOAD_TIMEOUT, RAW_DIR, USER_AGENT
     
 from helper import log_failure, format_error
 from monitor import monitor
