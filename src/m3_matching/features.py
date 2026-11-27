@@ -9,6 +9,9 @@ from pathlib import Path
 from typing import Dict, List, Optional, Tuple
 
 import pandas as pd
+import pandas as pd
+import pyarrow as pa
+import pyarrow.parquet as pq
 
 try:
     from rapidfuzz.fuzz import ratio as _rf_ratio
@@ -397,14 +400,38 @@ def extract_publication_pairs(
     return rows
 
 
-def _load_by_pub(path: Path) -> Dict[str, List[dict]]:
+def _load_by_pub(path: Path, keep_pubs: Optional[set] = None) -> Dict[str, List[dict]]:
     grouped: Dict[str, List[dict]] = defaultdict(list)
     with path.open("r", encoding="utf-8") as fh:
         for line in fh:
             if line.strip():
                 r = json.loads(line)
-                grouped[r["arxiv_id"]].append(r)
+                aid = r["arxiv_id"]
+                if keep_pubs is not None and aid not in keep_pubs:
+                    continue
+                grouped[aid].append(r)
     return grouped
+
+
+
+def _build_parquet_schema() -> "pa.Schema":
+    meta_fields = [
+        ("arxiv_id", pa.string()),
+        ("partition", pa.string()),
+        ("source_pool", pa.string()),
+        ("citation_key", pa.string()),
+        ("ref_arxiv_id", pa.string()),
+        ("has_label", pa.bool_()),
+        ("groundtruth_arxiv_id", pa.string()),
+        ("label", pa.int8()),
+    ]
+    return pa.schema(meta_fields + [(col, pa.float32()) for col in FEATURE_COLS])
+
+
+def _rows_to_table(rows: List[dict], schema: "pa.Schema") -> "pa.Table":
+    if hasattr(pa.Table, "from_pylist"):
+        return pa.Table.from_pylist(rows, schema=schema)
+    return pa.Table.from_pandas(pd.DataFrame(rows), schema=schema, preserve_index=False)
 
 
 def _load_labels(path: Path) -> Dict[Tuple[str, str], Optional[str]]:
@@ -430,55 +457,87 @@ def main():
         help="Merged labels.jsonl (or pass data/matching/auto_labels.jsonl before manual merge)",
     )
     parser.add_argument("--out", default="data/matching/pair_features.parquet")
+    parser.add_argument(
+        "--batch-rows",
+        type=int,
+        default=100_000,
+        help="Flush Parquet row group once buffered pair rows reach this size.",
+    )
     args = parser.parse_args()
 
     t0 = time.perf_counter()
     splits = json.loads(Path(args.splits).read_text(encoding="utf-8"))
-    bib_by_pub = _load_by_pub(Path(args.bibtex))
-    refs_by_pub = _load_by_pub(Path(args.references))
-    labels = _load_labels(Path(args.labels))
 
     pub_meta: List[Tuple[str, str, str]] = []
+    seen_pubs = set()
     if isinstance(splits.get("partitions"), dict):
         for part in ("train", "valid", "test"):
             for src in ("manual", "auto"):
                 for aid in splits["partitions"][part][src]:
-                    pub_meta.append((aid, part, src))
+                    if aid not in seen_pubs:
+                        seen_pubs.add(aid)
+                        pub_meta.append((aid, part, src))
     else:
         split_dict = splits.get("splits", splits)
         for part in ("train", "valid", "test"):
             for aid in split_dict.get(part, []):
-                pub_meta.append((aid, part, "auto"))
+                if aid not in seen_pubs:
+                    seen_pubs.add(aid)
+                    pub_meta.append((aid, part, "auto"))
 
-    all_rows: List[dict] = []
-    for aid, part, src in pub_meta:
-        all_rows.extend(
-            extract_publication_pairs(
+    bib_by_pub = _load_by_pub(Path(args.bibtex), keep_pubs=seen_pubs)
+    refs_by_pub = _load_by_pub(Path(args.references), keep_pubs=seen_pubs)
+    labels = _load_labels(Path(args.labels))
+
+    out_path = Path(args.out)
+    out_path.parent.mkdir(parents=True, exist_ok=True)
+    schema = _build_parquet_schema()
+
+    batch_rows: List[dict] = []
+    total_pairs = 0
+    labelled_pairs = 0
+    positive_pairs = 0
+    writer = pq.ParquetWriter(out_path, schema, compression="snappy")
+    try:
+        for aid, part, src in pub_meta:
+            pub_rows = extract_publication_pairs(
                 arxiv_id=aid,
                 partition=part,
                 source_pool=src,
-                entries=bib_by_pub.get(aid, []),
-                cands=refs_by_pub.get(aid, []),
+                entries=bib_by_pub.pop(aid, []),
+                cands=refs_by_pub.pop(aid, []),
                 labels=labels,
             )
-        )
-
-    df = pd.DataFrame(all_rows)
-    out_path = Path(args.out)
-    out_path.parent.mkdir(parents=True, exist_ok=True)
-    df.to_parquet(out_path, index=False)
+            if not pub_rows:
+                continue
+            total_pairs += len(pub_rows)
+            for r in pub_rows:
+                if r["has_label"]:
+                    labelled_pairs += 1
+                if r["label"] == 1:
+                    positive_pairs += 1
+            batch_rows.extend(pub_rows)
+            if len(batch_rows) >= args.batch_rows:
+                writer.write_table(_rows_to_table(batch_rows, schema))
+                batch_rows.clear()
+        if batch_rows:
+            writer.write_table(_rows_to_table(batch_rows, schema))
+            batch_rows.clear()
+    finally:
+        writer.close()
 
     elapsed = time.perf_counter() - t0
     summary = {
         "publications": len(pub_meta),
-        "total_pairs": len(df),
-        "labelled_pairs": int(df["has_label"].sum()),
-        "positive_pairs": int((df["label"] == 1).sum()),
+        "total_pairs": total_pairs,
+        "labelled_pairs": labelled_pairs,
+        "positive_pairs": positive_pairs,
         "features": len(FEATURE_COLS),
         "elapsed_seconds": round(elapsed, 2),
         "output": str(out_path),
     }
     print(json.dumps(summary, indent=2))
+
 
 
 if __name__ == "__main__":

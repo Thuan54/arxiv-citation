@@ -265,12 +265,48 @@ def cmd_audit_sample(args):
 
 
 def _norm_label(val: Optional[str]) -> Optional[str]:
-    if not val:
+    if val is None:
         return None
-    s = val.strip()
+    s = str(val).strip()
     if not s or s.upper() in {"NONE", "NULL", "N/A", "-"}:
         return None
     return s
+
+
+def _parse_bool(val) -> bool:
+    if isinstance(val, bool):
+        return val
+    if val is None:
+        return False
+    return str(val).strip().lower() in {"true", "1", "yes"}
+
+
+def _read_label_file(path: Path) -> List[dict]:
+    """Read manual label rows from .csv, .json (array or {records:[...]}), or .jsonl."""
+    suf = path.suffix.lower()
+    if suf == ".csv":
+        with path.open("r", encoding="utf-8") as fh:
+            return list(csv.DictReader(fh))
+    if suf == ".json":
+        payload = json.loads(path.read_text(encoding="utf-8"))
+        if isinstance(payload, list):
+            return payload
+        if isinstance(payload, dict):
+            for k in ("records", "labels", "items", "data"):
+                if isinstance(payload.get(k), list):
+                    return payload[k]
+        raise ValueError(f"Unsupported JSON structure in {path.name}; expected a list of objects.")
+    if suf == ".jsonl":
+        with path.open("r", encoding="utf-8") as fh:
+            return [json.loads(line) for line in fh if line.strip()]
+    return []
+
+
+def _iter_sheet_files(sheets_dir: Path) -> List[Path]:
+    return sorted(
+        p for p in sheets_dir.iterdir()
+        if p.is_file() and p.suffix.lower() in {".csv", ".json", ".jsonl"}
+    )
 
 
 def cohens_kappa(labels_a: List[Optional[str]], labels_b: List[Optional[str]]) -> float:
@@ -285,23 +321,21 @@ def cohens_kappa(labels_a: List[Optional[str]], labels_b: List[Optional[str]]) -
 
 def cmd_kappa(args):
     primary: Dict[Tuple[str, str], Optional[str]] = {}
-    for p in sorted(Path(args.sheets_dir).glob("*.csv")):
-        with p.open("r", encoding="utf-8") as fh:
-            for r in csv.DictReader(fh):
-                primary[(r["arxiv_id"].strip(), r["citation_key"].strip())] = _norm_label(r["true_ref_arxiv_id"])
+    for p in _iter_sheet_files(Path(args.sheets_dir)):
+        for r in _read_label_file(p):
+            primary[(str(r["arxiv_id"]).strip(), str(r["citation_key"]).strip())] = _norm_label(r.get("true_ref_arxiv_id"))
 
     la, lb, disagreements = [], [], []
-    with Path(args.double_csv).open("r", encoding="utf-8") as fh:
-        for r in csv.DictReader(fh):
-            key = (r["arxiv_id"].strip(), r["citation_key"].strip())
-            if key not in primary:
-                continue
-            a = primary[key]
-            b = _norm_label(r["true_ref_arxiv_id"])
-            la.append(a)
-            lb.append(b)
-            if a != b:
-                disagreements.append({"arxiv_id": key[0], "citation_key": key[1], "primary": a, "secondary": b})
+    for r in _read_label_file(Path(args.double_csv)):
+        key = (str(r["arxiv_id"]).strip(), str(r["citation_key"]).strip())
+        if key not in primary:
+            continue
+        a = primary[key]
+        b = _norm_label(r.get("true_ref_arxiv_id"))
+        la.append(a)
+        lb.append(b)
+        if a != b:
+            disagreements.append({"arxiv_id": key[0], "citation_key": key[1], "primary": a, "secondary": b})
 
     exact = sum(a == b for a, b in zip(la, lb))
     print(json.dumps({
@@ -326,28 +360,27 @@ def cmd_merge(args):
 
     manual_records: Dict[Tuple[str, str], dict] = {}
     errors = []
-    for p in sorted(Path(args.sheets_dir).glob("*.csv")):
-        with p.open("r", encoding="utf-8") as fh:
-            for r in csv.DictReader(fh):
-                aid = r["arxiv_id"].strip()
-                ckey = r["citation_key"].strip()
-                if aid not in manual_pubs:
-                    continue
-                target = _norm_label(r["true_ref_arxiv_id"])
-                unsure = r.get("unsure", "false").strip().lower() in {"true", "1", "yes"}
-                if target is not None and target not in valid_cands.get(aid, set()):
-                    errors.append(f"Invalid candidate {target} for ({aid}, {ckey}) in {p.name}")
-                if unsure and not args.allow_unsure:
-                    errors.append(f"Unresolved unsure=true for ({aid}, {ckey}) in {p.name}")
-                manual_records[(aid, ckey)] = {
-                    "arxiv_id": aid,
-                    "citation_key": ckey,
-                    "true_ref_arxiv_id": target,
-                    "source": "manual",
-                    "annotator": (r.get("annotator") or "manual").strip(),
-                    "confidence": 1.0,
-                    "unsure": unsure,
-                }
+    for p in _iter_sheet_files(Path(args.sheets_dir)):
+        for r in _read_label_file(p):
+            aid = str(r["arxiv_id"]).strip()
+            ckey = str(r["citation_key"]).strip()
+            if aid not in manual_pubs:
+                continue
+            target = _norm_label(r.get("true_ref_arxiv_id"))
+            unsure = _parse_bool(r.get("unsure", False))
+            if target is not None and target not in valid_cands.get(aid, set()):
+                errors.append(f"Invalid candidate {target} for ({aid}, {ckey}) in {p.name}")
+            if unsure and not args.allow_unsure:
+                errors.append(f"Unresolved unsure=true for ({aid}, {ckey}) in {p.name}")
+            manual_records[(aid, ckey)] = {
+                "arxiv_id": aid,
+                "citation_key": ckey,
+                "true_ref_arxiv_id": target,
+                "source": "manual",
+                "annotator": str(r.get("annotator") or "manual").strip(),
+                "confidence": float(r.get("confidence", 1.0)),
+                "unsure": unsure,
+            }
 
     # Verify every entry of every manual publication is labelled
     for aid in sorted(manual_pubs):

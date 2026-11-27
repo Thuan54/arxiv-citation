@@ -471,7 +471,6 @@ def parse_biblatex(raw: str) -> Entry:
         "arxiv" in vals.get("eprinttype", "arxiv").lower() else None
     f["year"] = find_year(vals.get("year") or vals.get("date") or "") if (vals.get("year") or vals.get("date")) else None
     f["note"] = tidy(clean(vals.get("note", "")))
-
     entry.entry_type = _BIBLATEX_TYPES.get(btype, "misc")
     if btype == "thesis" and "master" in vals.get("type", "").lower():
         entry.entry_type = "mastersthesis"
@@ -676,6 +675,97 @@ def parse_bibinfo(body: str, raw: str) -> Entry:
 # Style 4: generic plain text
 # --------------------------------------------------------------------------
 _EMPH_START = re.compile(r"\\(?:emph|textit|textsl)\s*\{|\{\\(?:em|it|sl)\s")
+_EMPH_ET_AL = re.compile(
+    r"(?:\\(?:emph|textit|textsl)\s*\{\s*(et\.?\s*al\.?)\s*\}"
+    r"|\{\s*\\(?:em|it|sl)\s+(et\.?\s*al\.?)\s*\})",
+    re.I,
+)
+_VENUE_HINT = re.compile(
+    r"(?:^(?:in\s+|vol\.?\s*\d|pp?\.?\s*\d|\d+\s*(?:\(|$)|arxiv[:\s])"
+    r"|\b(?:optica|nature|science|opt\.|phys\.|appl\.|proc\.|ieee|spie|mnras|apj|a&a|prl|pra|prb|ipn)\b"
+    r"|\s+\d{1,4}(?:-\d+)?\s*(?:\(\d+\))?$"
+    r"|\(\s*(?:1[5-9]|20)\d\d[a-z]?\s*\))",
+    re.I,
+)
+_ABBREV_TAIL = re.compile(
+    r"\b(?:J|Appl|Phys|Rev|Opt|Lett|Proc|Nat|Commun|Sci|Soc|Am|Int|Conf|Trans|Eng|Math|Chem|Biol|Res|Rep|Bull|Ann|Ser|Vol|No|Ed|Eds|pp|p)$"
+)
+
+
+def _split_top_commas(text: str) -> List[str]:
+    """Split on top-level `, ` without breaking braces or numbers like `400,000`."""
+    parts: List[str] = []
+    depth, start, i, n = 0, 0, 0, len(text)
+    while i < n:
+        ch = text[i]
+        if ch == "\\":
+            i += 2
+            continue
+        if ch == "{":
+            depth += 1
+        elif ch == "}":
+            depth = max(0, depth - 1)
+        elif ch == "," and depth == 0 and i + 1 < n and text[i + 1].isspace():
+            seg = text[start:i].strip()
+            if seg:
+                parts.append(seg)
+            i += 1
+            while i < n and text[i].isspace():
+                i += 1
+            start = i
+            continue
+        i += 1
+    tail = text[start:].strip()
+    if tail:
+        parts.append(tail)
+    return parts
+
+
+def _split_title_and_venue_after_etal(entry: Entry, rest: str) -> None:
+    """Split title and venue when `Authors, et al.` is followed by plain text."""
+    f = entry.fields
+    rest = rest.strip(" ,;.")
+    if not rest:
+        return
+    p_parts = re.split(r"(?<![A-Z])\.\s+(?=[A-Z0-9\\{“\"`])", rest, maxsplit=1)
+    if len(p_parts) == 2 and not _ABBREV_TAIL.search(clean(p_parts[0])):
+        f["title"] = tidy(clean(p_parts[0]), title=True)
+        venue_str = p_parts[1]
+    else:
+        segs = _split_top_commas(rest)
+        if len(segs) == 1:
+            f["title"] = tidy(clean(segs[0]), title=True)
+            return
+        v_idx = next(
+            (
+                i for i in range(1, len(segs))
+                if (
+                    _JOURNAL_WORDS.search(clean(segs[i]))
+                    or _CONF_WORDS.search(clean(segs[i]))
+                    or _ARXIV_VENUE.search(clean(segs[i]))
+                    or _VENUE_HINT.search(clean(segs[i]))
+                )
+            ),
+            1,
+        )
+        f["title"] = tidy(clean(", ".join(segs[:v_idx])), title=True)
+        venue_str = ", ".join(segs[v_idx:])
+
+    _venue_from_text(entry, venue_str)
+    if f.get("journal"):
+        m_vol = re.match(r"^(.+?)\s+(\d{1,4}(?:-\d+)?)$", str(f["journal"]))
+        if m_vol:
+            f["journal"] = tidy(m_vol.group(1))
+            f.setdefault("volume", m_vol.group(2))
+    if not (f.get("journal") or f.get("booktitle") or f.get("publisher")):
+        first_v = _split_top_commas(clean(venue_str))[0] if venue_str else ""
+        first_v = re.sub(r"\s*\(\s*(?:1[5-9]|20)\d\d[a-z]?\s*\).*$", "", first_v).strip(" .,")
+        m_vol = re.match(r"^([A-Za-z][A-Za-z.&\-\s]{1,50}?)\s+(\d{1,4}(?:-\d+)?)$", first_v)
+        if m_vol:
+            _assign_venue(f, m_vol.group(1), "journal")
+            f.setdefault("volume", m_vol.group(2))
+        elif first_v and not re.search(r"\d", first_v) and len(first_v.split()) <= 6:
+            _assign_venue(f, first_v, "journal")
 _QUOTES = [
     re.compile(r"``(.+?)(?:\\?'\\?'|(?<!\\)\"|”)", re.S),
     re.compile(r"“(.+?)”", re.S),
@@ -796,6 +886,7 @@ def parse_generic(body: str, raw: str, label: Optional[str]) -> Entry:
     text = "".join(unwrapped)
     text = re.sub(r"\\(?:url|doi)\s*\{[^{}]*\}", " ", text).strip()
 
+    text = _EMPH_ET_AL.sub(lambda m: m.group(1) or m.group(2), text)
     blocks = [b.strip() for b in re.split(r"\\newblock\b", text) if b.strip()]
     year_hint = None
 
@@ -835,30 +926,41 @@ def parse_generic(body: str, raw: str, label: Optional[str]) -> Entry:
             _venue_from_text(entry, one[quote.end():])
         elif emph and emph[0] > 2:
             # JHEP / SciPost / revtex / plain: "Authors, \emph{Title}, \emph{Journal} \textbf{vol} (year) page"
+            # or "Authors, et al., Plain Title, [in] \emph{Venue}, vol (year)"
             # or title-less: "Authors, \emph{Journal} \textbf{vol} (year) page"
             authors_raw = one[:emph[0]].rstrip(" ,;.")
-            m_yr = re.search(r"[\s,]+\(?((?:1[5-9]|20)\d\d)[a-z]?\)?\s*$", authors_raw)
-            if m_yr:
-                year_hint, authors_raw = int(m_yr.group(1)), authors_raw[:m_yr.start()]
-            entry.authors, entry.et_al = parse_authors(authors_raw)
-
-            emph_clean = clean(emph[2]).strip(" .,")
-            after_raw = one[emph[1]:].lstrip(" ,;.")
-            second_emph = _first_emph(after_raw)
-            looks_like_venue_only = (
-                second_emph is None
-                and bool(re.match(r"^(?:\\textbf\s*\{|\d|\(\s*(?:1[5-9]|20)\d\d)", after_raw))
-                and (
-                    _JOURNAL_WORDS.search(emph_clean)
-                    or _CONF_WORDS.search(emph_clean)
-                    or bool(re.fullmatch(r"[A-Z][A-Za-z.\s&]{0,25}", emph_clean))
-                )
-            )
-            if looks_like_venue_only:
-                _venue_from_text(entry, one[emph[0]:])
+            m_etal_pre = re.search(r"\bet\.?\s*al\.?", authors_raw, re.I)
+            between_etal = authors_raw[m_etal_pre.end():].strip(" ,;.") if m_etal_pre else ""
+            between_title = re.sub(r"(?i)(?:[,.:\s]+|^)in$", "", between_etal).strip(" ,;.")
+            between_title_no_yr = re.sub(r"^\(?((?:1[5-9]|20)\d\d)[a-z]?\)?[.,\s]*", "", between_title).strip()
+            if m_etal_pre and len(between_title_no_yr.split()) >= 2:
+                entry.authors, entry.et_al = parse_authors(authors_raw[:m_etal_pre.end()])
+                f["title"] = tidy(clean(between_title_no_yr), title=True)
+                has_in = bool(re.search(r"(?i)(?:^|[,.:\s])in$", between_etal))
+                _venue_from_text(entry, ("in " + one[emph[0]:]) if has_in else one[emph[0]:])
             else:
-                f["title"] = tidy(emph_clean, title=True)
-                _venue_from_text(entry, after_raw)
+                m_yr = re.search(r"[\s,]+\(?((?:1[5-9]|20)\d\d)[a-z]?\)?\s*$", authors_raw)
+                if m_yr:
+                    year_hint, authors_raw = int(m_yr.group(1)), authors_raw[:m_yr.start()]
+                entry.authors, entry.et_al = parse_authors(authors_raw)
+
+                emph_clean = clean(emph[2]).strip(" .,")
+                after_raw = one[emph[1]:].lstrip(" ,;.")
+                second_emph = _first_emph(after_raw)
+                looks_like_venue_only = (
+                    second_emph is None
+                    and bool(re.match(r"^(?:\\textbf\s*\{|\d|\(\s*(?:1[5-9]|20)\d\d)", after_raw))
+                    and (
+                        _JOURNAL_WORDS.search(emph_clean)
+                        or _CONF_WORDS.search(emph_clean)
+                        or bool(re.fullmatch(r"[A-Z][A-Za-z.\s&]{0,25}", emph_clean))
+                    )
+                )
+                if looks_like_venue_only:
+                    _venue_from_text(entry, one[emph[0]:])
+                else:
+                    f["title"] = tidy(emph_clean, title=True)
+                    _venue_from_text(entry, after_raw)
         elif apa and "," in apa.group("a"):
             year_hint = int(apa.group("y"))
             entry.authors, entry.et_al = parse_authors(apa.group("a"))
@@ -885,6 +987,10 @@ def parse_generic(body: str, raw: str, label: Optional[str]) -> Entry:
             parts = re.split(r"(?<![A-Z])\.\s+(?=[A-Z0-9\\{“\"`])", rest_part.strip(), maxsplit=1)
             f["title"] = tidy(parts[0], title=True)
             _venue_from_text(entry, parts[1] if len(parts) > 1 else "")
+        elif re.match(r"^(?P<a>.+?\bet\.?\s*al\.?)\s*[,.:]?\s+(?P<r>.+)$", one, re.I | re.S):
+            m_et = re.match(r"^(?P<a>.+?\bet\.?\s*al\.?)\s*[,.:]?\s+(?P<r>.+)$", one, re.I | re.S)
+            entry.authors, entry.et_al = parse_authors(m_et.group("a"))
+            _split_title_and_venue_after_etal(entry, m_et.group("r"))
         else:                                              # "Authors. Title. Venue, year."
             parts = re.split(r"(?<![A-Z])(?<!et al)\.\s+(?=[A-Z0-9\\{“\"`])", one)
             if len(parts) >= 3:
@@ -957,8 +1063,6 @@ def parse_reference(raw: str) -> Entry:
         f["year"] = find_year(year_src) if year_src else find_year(clean(stripped))
         f["note"] = tidy(clean(vals.get("note", "")))
         f["howpublished"] = tidy(clean(vals.get("howpublished", "")))
-
-
     elif re.match(r"\\entry\s*\{", stripped):
         entry = parse_biblatex(stripped)
     else:
@@ -982,6 +1086,7 @@ def parse_reference(raw: str) -> Entry:
         if f[k] in ("", None):
             f[k] = None
     return entry
+
 
 # --------------------------------------------------------------------------
 # BibTeX rendering
@@ -1021,5 +1126,6 @@ def to_bibtex(key: str, entry_type: str, fields: Dict[str, object],
 
     if fields.get("eprint"):
         lines.insert(-1 if fields.get("note") else len(lines), "  archiveprefix = {arXiv},")
+
     body = "\n".join(lines).rstrip(",")
     return f"@{entry_type}{{{key},\n{body}\n}}"
